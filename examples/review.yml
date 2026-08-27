@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Review pull request
-        uses: wuisabel-gif/second-opinion@v0.2.3
+        uses: wuisabel-gif/second-opinion@v0.3.0
         with:
           api-key: ${{ secrets.REVIEW_API_KEY }}
-          provider: ${{ vars.REVIEW_PROVIDER || 'anthropic' }}
+          provider: ${{ vars.REVIEW_ENDPOINT != '' && 'webhook' || vars.REVIEW_PROVIDER || 'anthropic' }}
           model: ${{ vars.REVIEW_MODEL }}
           base-url: ${{ vars.REVIEW_BASE_URL }}
           endpoint: ${{ vars.REVIEW_ENDPOINT }}

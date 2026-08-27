@@ -1,6 +1,6 @@
 [package]
 name = "second-opinion"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 description = "Agent-agnostic AI pull request reviews as a GitHub Action"
 license = "MIT"

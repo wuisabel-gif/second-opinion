@@ -15,7 +15,7 @@ The reusable action can also be added directly:
 
 ```yaml
 - name: Review pull request
-  uses: wuisabel-gif/second-opinion@v0.2.3
+  uses: wuisabel-gif/second-opinion@v0.3.0
   with:
     api-key: ${{ secrets.REVIEW_API_KEY }}
     provider: ${{ vars.REVIEW_PROVIDER || 'anthropic' }}
@@ -53,6 +53,10 @@ Add `REVIEW.md` to the repository's default branch to define project-specific re
 - Treat authentication and authorization regressions as high severity.
 - Ignore generated files under `src/generated/`.
 - Database migrations must be backward compatible.
+- Control code growth: prefer deletion or extension of existing code over new abstractions.
+  Add a new file, function, or dependency only when it clearly reduces duplication,
+  improves correctness/clarity, or is required for a concrete need; avoid speculative
+  scaffolding.
 ```
 
 ## Provider setup
@@ -144,6 +148,52 @@ Responses wrapped in `review`, `output`, `result`, or `data` are also accepted, 
 - `REVIEW_CONTEXT_BYTES`: repository-context budget; defaults to `60000`, and `0` disables context fetching.
 - `REVIEW_BOT_LOGIN`: only this author's hidden fingerprints are trusted for deduplication; defaults to `github-actions[bot]`.
 - Diff and line-comment limits are bounded internally to control request and GitHub API sizes.
+
+## About "subscription only" usage
+
+If by "subscription" you mean a ChatGPT/Claude web subscription account, `second-opinion`
+cannot use that directly in built-in providers right now.
+
+Built-in provider adapters in this repo are API-key based (`REVIEW_API_KEY`, `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, or per-adapter compatible vars).
+
+If you want to avoid per-user credentials, your options are:
+
+1. Keep one shared API key/credential in this repo's secrets (easy to adopt today).
+2. Use `REVIEW_PROVIDER=webhook` and run your own backend that handles your preferred
+   billing/subscription model, then return the normalized review JSON.
+
+Contributors still do nothing special in both cases.
+
+### Minimal setup for now
+
+```yaml
+with:
+  api-key: ${{ secrets.REVIEW_API_KEY }}
+  provider: openai
+```
+
+### Future-friendly (single endpoint) setup
+
+```yaml
+with:
+  provider: webhook
+  endpoint: ${{ vars.REVIEW_ENDPOINT }}
+  api-key: ${{ secrets.REVIEW_API_KEY }}
+```
+
+In webhook mode, the action still collects PR diff/context/rules; your endpoint performs the
+model call.
+
+## Pullfrog starter
+
+This repo now includes `.github/workflows/pullfrog.yml` for manual Pullfrog runs.
+It defaults to `.github/pullfrog/review.md`, which tells Pullfrog to review changes
+against this repo's `REVIEW.md` policy and to keep code growth in check.
+
+To use automated Pullfrog triggers, install the Pullfrog GitHub App and configure
+the trigger in the Pullfrog dashboard. The repo-side workflow is still useful for
+ad hoc manual runs from the Actions tab.
 
 ## Benchmarking
 

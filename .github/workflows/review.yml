@@ -13,24 +13,28 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REVIEW_API_KEY: ${{ secrets.REVIEW_API_KEY }}
+      REVIEW_ENDPOINT: ${{ vars.REVIEW_ENDPOINT || '' }}
     steps:
       - name: Explain disabled self-review
-        if: env.REVIEW_API_KEY == ''
-        run: echo "Self-review is disabled until the REVIEW_API_KEY repository secret is configured."
+        if: env.REVIEW_API_KEY == '' && env.REVIEW_ENDPOINT == ''
+        run: |
+          echo "Self-review is disabled until either:"
+          echo "- the REVIEW_API_KEY repository secret is set for built-in providers, or"
+          echo "- REVIEW_ENDPOINT is set for webhook mode."
 
       - name: Check out the trusted base revision
-        if: env.REVIEW_API_KEY != ''
+        if: env.REVIEW_API_KEY != '' || env.REVIEW_ENDPOINT != ''
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
       - name: Review pull request
-        if: env.REVIEW_API_KEY != ''
+        if: env.REVIEW_API_KEY != '' || env.REVIEW_ENDPOINT != ''
         uses: ./
         with:
           api-key: ${{ env.REVIEW_API_KEY }}
-          provider: ${{ vars.REVIEW_PROVIDER || 'anthropic' }}
+          provider: ${{ vars.REVIEW_ENDPOINT != '' && 'webhook' || vars.REVIEW_PROVIDER || 'anthropic' }}
           model: ${{ vars.REVIEW_MODEL }}
           base-url: ${{ vars.REVIEW_BASE_URL }}
           endpoint: ${{ vars.REVIEW_ENDPOINT }}
