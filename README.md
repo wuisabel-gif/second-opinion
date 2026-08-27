@@ -15,7 +15,7 @@ The reusable action can also be added directly:
 
 ```yaml
 - name: Review pull request
-  uses: wuisabel-gif/second-opinion@v0.3.0
+  uses: wuisabel-gif/second-opinion@v0.3.1
   with:
     api-key: ${{ secrets.REVIEW_API_KEY }}
     provider: ${{ vars.REVIEW_PROVIDER || 'anthropic' }}
