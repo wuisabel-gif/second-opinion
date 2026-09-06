@@ -6,20 +6,30 @@ on:
 
 permissions:
   contents: read
+  id-token: write # Required only when REVIEW_BROKER_URL selects codex-broker.
   pull-requests: write
+
+# Serializes direct Codex runs that share one rotating refresh-token chain.
+# Broker and API-key deployments may choose a narrower per-PR group instead.
+concurrency:
+  group: second-opinion-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   review:
     runs-on: ubuntu-latest
     steps:
       - name: Review pull request
-        uses: wuisabel-gif/second-opinion@v0.3.1
+        uses: wuisabel-gif/second-opinion@v0.4.0
         with:
           api-key: ${{ secrets.REVIEW_API_KEY }}
-          provider: ${{ vars.REVIEW_ENDPOINT != '' && 'webhook' || vars.REVIEW_PROVIDER || 'anthropic' }}
+          provider: ${{ vars.REVIEW_BROKER_URL != '' && 'codex-broker' || vars.REVIEW_ENDPOINT != '' && 'webhook' || vars.REVIEW_PROVIDER || 'anthropic' }}
           model: ${{ vars.REVIEW_MODEL }}
           base-url: ${{ vars.REVIEW_BASE_URL }}
           endpoint: ${{ vars.REVIEW_ENDPOINT }}
+          broker-url: ${{ vars.REVIEW_BROKER_URL }}
+          broker-audience: ${{ vars.REVIEW_BROKER_AUDIENCE }}
+          codex-auth-json: ${{ secrets.CODEX_AUTH_JSON }}
           auth-header: ${{ vars.REVIEW_AUTH_HEADER || 'Authorization' }}
           auth-scheme: ${{ vars.REVIEW_AUTH_SCHEME || 'Bearer' }}
           response-json-pointer: ${{ vars.REVIEW_RESPONSE_JSON_POINTER }}

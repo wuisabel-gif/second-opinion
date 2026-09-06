@@ -1,3 +1,7 @@
 /target/
+node_modules/
+broker/.env
+hosted/.env
+hosted-state.json
 *.log
 .DS_Store

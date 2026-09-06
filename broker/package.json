@@ -1,0 +1,19 @@
+{
+  "name": "second-opinion-codex-broker",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "admin": "node src/admin.mjs",
+    "check": "node --check src/server.mjs && node --check src/admin.mjs && node --check src/codex.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "jose": "6.2.10",
+    "pg": "8.23.0"
+  }
+}

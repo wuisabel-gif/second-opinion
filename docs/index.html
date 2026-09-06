@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>second-opinion — Agent-agnostic AI pull request review</title>
-<meta name="description" content="Change the agent, not the reviewer. A Rust GitHub Action that posts line-level AI code review findings on your pull requests — Anthropic, OpenAI, OpenAI-compatible, or any webhook.">
+<meta name="description" content="Change the agent, not the reviewer. Line-level AI pull request reviews through Anthropic, OpenAI, webhooks, or a ChatGPT/Codex subscription.">
 <meta name="theme-color" content="#f6f2ea">
 <link rel="canonical" href="https://wuisabel-gif.github.io/second-opinion/">
 <meta property="og:title" content="second-opinion — AI pull request review">
-<meta property="og:description" content="Change the agent, not the reviewer. Plug line-level AI code review into any GitHub repository.">
+<meta property="og:description" content="Plug line-level AI review into GitHub with an API key, Codex subscription login, or a hosted GitHub App.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://wuisabel-gif.github.io/second-opinion/">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -146,7 +146,7 @@
   .config-note{color:var(--muted);font-size:.78rem;margin:.7rem 0 0}
 
   /* provider rows */
-  .rows{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--hairline);border-left:1px solid var(--hairline)}
+  .rows{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid var(--hairline);border-left:1px solid var(--hairline)}
   .row{min-width:0;padding:1.1rem;border-right:1px solid var(--hairline);border-bottom:1px solid var(--hairline);transition:background-color .25s var(--ease),transform .25s var(--ease)}
   .row:hover{background:var(--surface-0);transform:translateY(-3px)}
   .row h3{font-family:var(--sans);font-weight:600;font-size:.9rem;margin:0 0 .55rem}
@@ -230,7 +230,7 @@
       <p class="eyebrow">Agent-agnostic AI code review</p>
       <h1>Change the agent,<br>not the <em>reviewer</em>.</h1>
       <p class="deck">Line-level AI pull request review, packaged as one GitHub Action.</p>
-      <p class="lead">Send each PR diff to Anthropic, OpenAI, any compatible service, or your own webhook. Get precise findings back on the lines that matter. Written in Rust. No vendor lock-in.</p>
+      <p class="lead">Use Anthropic, OpenAI, your own webhook, or an eligible Codex subscription. Run it as an Action or install the hosted GitHub App—every path returns the same precise line-level findings.</p>
       <div class="cta-row">
         <a class="btn primary" href="https://github.com/marketplace/actions/second-opinion-ai-code-review-action">Install from Marketplace →</a>
         <a class="btn ghost" href="https://github.com/wuisabel-gif/second-opinion">View GitHub</a>
@@ -267,7 +267,7 @@
   <div class="shell">
     <div class="section-head" data-reveal>
       <h2>Plug it into GitHub</h2>
-      <p class="intro">Three steps, about two minutes. The only credential you provide is your provider key, stored as an encrypted GitHub secret — it never touches the workflow file or the repository.</p>
+      <p class="intro">Choose your path: an API key, a ChatGPT-authenticated Codex login, or the hosted GitHub App with service-managed credentials. Credentials never belong in the workflow file.</p>
     </div>
 
     <div class="install-grid" data-reveal>
@@ -275,8 +275,8 @@
         <div class="step">
           <span class="num">01</span>
           <div>
-            <h3>Add your key</h3>
-            <p>In <b>Settings → Secrets and variables → Actions</b>, create <code>REVIEW_API_KEY</code>. It stays encrypted by GitHub.</p>
+            <h3>Choose model access</h3>
+            <p>Use <code>REVIEW_API_KEY</code>, run <code>codex login</code> once and save <code>CODEX_AUTH_JSON</code>, or use the hosted App without a repository credential.</p>
           </div>
         </div>
         <div class="step">
@@ -315,11 +315,12 @@
     <span class="k">runs-on:</span> ubuntu-latest
     <span class="k">steps:</span>
       - <span class="k">name:</span> Review pull request
-        <span class="k">uses:</span> wuisabel-gif/second-opinion@v0.3.1
+        <span class="k">uses:</span> wuisabel-gif/second-opinion@v0.4.0
         <span class="k">with:</span>
           <span class="k">api-key:</span> ${{ secrets.REVIEW_API_KEY }}
           <span class="k">provider:</span> ${{ vars.REVIEW_PROVIDER || 'anthropic' }}
-          <span class="k">model:</span> ${{ vars.REVIEW_MODEL }}</pre>
+          <span class="k">model:</span> ${{ vars.REVIEW_MODEL }}
+          <span class="k">codex-auth-json:</span> ${{ secrets.CODEX_AUTH_JSON }}</pre>
         </div>
         <p class="config-note">Webhooks, consensus passes, and vote thresholds: <a href="https://github.com/wuisabel-gif/second-opinion/blob/main/examples/review.yml">full configuration →</a></p>
       </div>
@@ -345,6 +346,14 @@
       <div class="row">
         <h3>OpenAI-compatible</h3>
         <p>LiteLLM, vLLM, Ollama, cloud gateways — point <code class="inline-code">REVIEW_BASE_URL</code> at any chat-completions endpoint.</p>
+      </div>
+      <div class="row">
+        <h3>Codex CLI<span class="tag">subscription</span></h3>
+        <p>Run the official CLI from a ChatGPT login using <code class="inline-code">CODEX_AUTH_JSON</code>. No OpenAI API key or API billing.</p>
+      </div>
+      <div class="row">
+        <h3>Codex broker<span class="tag">no repo key</span></h3>
+        <p>Keep rotating subscription auth encrypted on your server. GitHub Actions authenticates with a one-use OIDC token.</p>
       </div>
       <div class="row">
         <h3>Webhook</h3>
