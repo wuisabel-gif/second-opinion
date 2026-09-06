@@ -246,15 +246,29 @@ function cancelInstallationJobs(state, installationId) {
   }
 }
 
-async function upsertInstallation(store, id, account, managerId, config, suspended, lifecycleAt) {
+async function upsertInstallation(
+  store,
+  id,
+  account,
+  managerId,
+  config,
+  suspended,
+  lifecycleAt,
+  action,
+) {
   return store.update((state) => {
     const key = String(id);
-    state.installations[key] ||= newInstallation(key, account, managerId, config, lifecycleAt);
+    if (!state.installations[key]) {
+      if (action !== 'created') return null;
+      state.installations[key] = newInstallation(key, account, managerId, config, lifecycleAt);
+    }
     if ((state.installations[key].lifecycleAt || 0) > lifecycleAt) {
       return state.installations[key];
     }
     state.installations[key].account = account || state.installations[key].account;
-    state.installations[key].managerId ||= managerId;
+    if (action === 'created' && !state.installations[key].managerId) {
+      state.installations[key].managerId = managerId;
+    }
     if (suspended !== undefined) state.installations[key].suspended = suspended;
     if (suspended) cancelInstallationJobs(state, key);
     state.installations[key].lifecycleAt = lifecycleAt;
@@ -295,6 +309,10 @@ async function reserveDelivery(store, deliveryId) {
   });
 }
 
+async function releaseDelivery(store, deliveryId) {
+  return store.update((state) => { delete state.deliveries[deliveryId]; });
+}
+
 export async function reserveReview(store, job, limit, now = Date.now()) {
   return store.update((state) => {
     const installation = state.installations[String(job.installationId)];
@@ -313,7 +331,19 @@ export async function reserveReview(store, job, limit, now = Date.now()) {
 
     state.usage[usageKey] = used + 1;
     state.jobs[jobKey] = { status: 'queued', job, createdAt: now, updatedAt: now };
-    return { accepted: true, jobKey, installation: { ...installation } };
+    return { accepted: true, jobKey, usageKey, installation: { ...installation } };
+  });
+}
+
+export async function rollbackReviewReservation(store, reservation) {
+  return store.update((state) => {
+    const record = state.jobs[reservation.jobKey];
+    if (!record || record.status !== 'queued') return false;
+    delete state.jobs[reservation.jobKey];
+    const used = state.usage[reservation.usageKey] || 0;
+    if (used <= 1) delete state.usage[reservation.usageKey];
+    else state.usage[reservation.usageKey] = used - 1;
+    return true;
   });
 }
 
@@ -405,6 +435,7 @@ export function reviewerEnvironment(config, installation, token, job) {
     REVIEW_API_KEY: credential,
     REVIEW_BOT_LOGIN: config.botLogin,
     EXPECTED_HEAD_SHA: job.headSha,
+    REVIEW_RUN_ID: `${job.installationId}:${job.repositoryId}:${job.pullNumber}:${job.headSha}`,
   };
   if (provider === 'codex-broker') {
     provider = 'webhook';
@@ -470,10 +501,11 @@ export async function spawnReviewer(config, installation, token, job, signal) {
 export function createQueue(concurrency, maxQueue, worker) {
   const jobs = [];
   let active = 0;
+  let reserved = 0;
   let closed = false;
   const idleWaiters = [];
   const notifyIdle = () => {
-    if (active === 0 && jobs.length === 0) {
+    if (active === 0 && jobs.length === 0 && reserved === 0) {
       for (const resolve of idleWaiters.splice(0)) resolve();
     }
   };
@@ -489,13 +521,36 @@ export function createQueue(concurrency, maxQueue, worker) {
         });
     }
   };
-  const enqueue = (job) => {
-    if (closed) return false;
-    if (jobs.length >= maxQueue) return false;
-    jobs.push(job);
-    pump();
-    return true;
+  const reserve = () => {
+    if (closed || active + jobs.length + reserved >= concurrency + maxQueue) return null;
+    reserved += 1;
+    let settled = false;
+    return {
+      commit(job) {
+        if (settled) throw new Error('queue reservation is already settled');
+        settled = true;
+        reserved -= 1;
+        if (closed) {
+          notifyIdle();
+          return false;
+        }
+        jobs.push(job);
+        pump();
+        return true;
+      },
+      release() {
+        if (settled) return;
+        settled = true;
+        reserved -= 1;
+        notifyIdle();
+      },
+    };
   };
+  const enqueue = (job) => {
+    const reservation = reserve();
+    return reservation ? reservation.commit(job) : false;
+  };
+  enqueue.reserve = reserve;
   enqueue.close = () => {
     closed = true;
     const pending = jobs.splice(0);
@@ -503,7 +558,7 @@ export function createQueue(concurrency, maxQueue, worker) {
     return pending;
   };
   enqueue.waitForIdle = () => {
-    if (active === 0 && jobs.length === 0) return Promise.resolve();
+    if (active === 0 && jobs.length === 0 && reserved === 0) return Promise.resolve();
     return new Promise((resolve) => idleWaiters.push(resolve));
   };
   return enqueue;
@@ -511,6 +566,8 @@ export function createQueue(concurrency, maxQueue, worker) {
 
 function createReviewQueue(config, store) {
   const active = new Map();
+  const scheduled = new Set();
+  let refill = () => {};
   const enqueue = createQueue(config.workerConcurrency, config.maxQueue, async ({ job, jobKey }) => {
     const installationId = String(job.installationId);
     const controller = new AbortController();
@@ -556,16 +613,59 @@ function createReviewQueue(config, store) {
     } finally {
       controllers.delete(controller);
       if (controllers.size === 0) active.delete(installationId);
+      scheduled.delete(jobKey);
+      queueMicrotask(refill);
     }
   });
+  const reserve = () => {
+    const admission = enqueue.reserve();
+    if (!admission) return null;
+    return {
+      commit(record) {
+        if (scheduled.has(record.jobKey)) {
+          admission.release();
+          return false;
+        }
+        scheduled.add(record.jobKey);
+        if (!admission.commit(record)) {
+          scheduled.delete(record.jobKey);
+          return false;
+        }
+        return true;
+      },
+      release: () => admission.release(),
+    };
+  };
+  const schedule = (record) => {
+    const admission = reserve();
+    return admission ? admission.commit(record) : false;
+  };
+  let refilling = false;
+  refill = async () => {
+    if (refilling) return;
+    refilling = true;
+    try {
+      const records = await store.read((state) => Object.entries(state.jobs)
+        .filter(([jobKey, record]) => record.status === 'queued' && record.job && !scheduled.has(jobKey))
+        .map(([jobKey, record]) => ({ jobKey, job: record.job })));
+      for (const record of records) {
+        if (!schedule(record)) break;
+      }
+    } finally {
+      refilling = false;
+    }
+  };
   return {
-    enqueue,
+    reserve,
+    schedule,
+    refill,
     cancel(installationId) {
       for (const controller of active.get(String(installationId)) || []) controller.abort();
     },
     async shutdown() {
       // Pending records remain queued in persistent state and are recovered on restart.
-      enqueue.close();
+      const pending = enqueue.close();
+      for (const record of pending) scheduled.delete(record.jobKey);
       for (const controllers of active.values()) {
         for (const controller of controllers) controller.abort('shutdown');
       }
@@ -884,9 +984,10 @@ async function handleWebhook(req, res, store, config, reviewQueue, rateLimiter) 
     return sendJson(res, 400, { error: 'invalid webhook JSON' });
   }
   const event = req.headers['x-github-event'];
+  const deliveryId = req.headers['x-github-delivery'];
   let freshDelivery;
   try {
-    freshDelivery = await reserveDelivery(store, req.headers['x-github-delivery']);
+    freshDelivery = await reserveDelivery(store, deliveryId);
   } catch (error) {
     return sendJson(res, error.statusCode || 400, { error: error.message });
   }
@@ -913,7 +1014,7 @@ async function handleWebhook(req, res, store, config, reviewQueue, rateLimiter) 
         ? true
         : payload.action === 'unsuspend' ? false : undefined;
       const lifecycleAt = Date.parse(payload.installation?.updated_at || '') || Date.now();
-      await upsertInstallation(
+      const installation = await upsertInstallation(
         store,
         installationId,
         payload.installation?.account?.login,
@@ -921,7 +1022,11 @@ async function handleWebhook(req, res, store, config, reviewQueue, rateLimiter) 
         config,
         suspended,
         lifecycleAt,
+        payload.action,
       );
+      if (!installation) {
+        return sendJson(res, 202, { accepted: false, reason: 'lifecycle_before_created' });
+      }
     }
     return sendJson(res, 202, { accepted: true });
   }
@@ -929,6 +1034,7 @@ async function handleWebhook(req, res, store, config, reviewQueue, rateLimiter) 
     return sendJson(res, 202, { accepted: false, reason: 'event_ignored' });
   }
   if (!rateLimiter.accept(String(installationId))) {
+    await releaseDelivery(store, deliveryId);
     return sendJson(res, 429, { error: 'installation rate limit exceeded' });
   }
 
@@ -940,12 +1046,25 @@ async function handleWebhook(req, res, store, config, reviewQueue, rateLimiter) 
     return sendJson(res, 400, { error: 'pull request payload is incomplete' });
   }
   const job = { installationId, repository, repositoryId, pullNumber, headSha };
-  const reservation = await reserveReview(store, job, config.monthlyReviewLimit);
-  if (reservation.accepted) {
-    if (!reviewQueue.enqueue({ job, jobKey: reservation.jobKey })) {
-      await setJobStatus(store, reservation.jobKey, 'failed');
-      return sendJson(res, 503, { error: 'review queue is full' });
-    }
+  const admission = reviewQueue.reserve();
+  if (!admission) {
+    await releaseDelivery(store, deliveryId);
+    return sendJson(res, 503, { error: 'review queue is full' });
+  }
+  let reservation;
+  try {
+    reservation = await reserveReview(store, job, config.monthlyReviewLimit);
+  } catch (error) {
+    admission.release();
+    await releaseDelivery(store, deliveryId);
+    throw error;
+  }
+  if (!reservation.accepted) {
+    admission.release();
+  } else if (!admission.commit({ job, jobKey: reservation.jobKey })) {
+    await rollbackReviewReservation(store, reservation);
+    await releaseDelivery(store, deliveryId);
+    return sendJson(res, 503, { error: 'review service is shutting down' });
   }
   sendJson(res, 202, { accepted: reservation.accepted, reason: reservation.reason });
 }
@@ -970,17 +1089,7 @@ export function createRateLimiter(limit, now = () => Date.now()) {
 export function createServer(config, store) {
   const reviewQueue = createReviewQueue(config, store);
   const rateLimiter = createRateLimiter(config.rateLimitPerMinute);
-  store.read((state) => Object.entries(state.jobs)
-    .filter(([, job]) => job.status === 'queued' && job.job)
-    .map(([jobKey, record]) => ({
-      job: record.job,
-      jobKey,
-    })))
-    .then(async (jobs) => {
-      for (const job of jobs) {
-        if (!reviewQueue.enqueue(job)) await setJobStatus(store, job.jobKey, 'failed');
-      }
-    })
+  reviewQueue.refill()
     .catch((error) => console.error(`could not recover queued reviews: ${error.message}`));
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', config.publicUrl);

@@ -11,6 +11,10 @@ alpha. Read [`../docs/hosted-service.md`](../docs/hosted-service.md) before depl
 signup requires the production gates listed there, including a transactional shared datastore,
 distributed rate limiting, payment enforcement, legal review, and operational monitoring.
 
+The alpha uses two layers of idempotency: signed delivery IDs and a durable bot-authored run marker
+on the GitHub review. Interrupted jobs can therefore be requeued without repeating a completed
+model call/review, and queue admission is reserved before monthly quota is charged.
+
 ## GitHub App
 
 1. Create one service-owned GitHub App under the operator's GitHub settings.

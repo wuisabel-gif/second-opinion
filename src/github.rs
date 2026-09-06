@@ -19,6 +19,7 @@ const MAX_CONTEXT_BLOBS: usize = 64;
 const MAX_CHANGED_FILES: usize = 500;
 const MAX_TREE_ENTRIES: usize = 20_000;
 const MAX_GITHUB_JSON_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REVIEW_RUN_ID_BYTES: usize = 256;
 
 pub struct ReviewInput {
     pub diff: String,
@@ -75,6 +76,24 @@ pub fn expected_head_sha() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn review_run_id() -> Result<Option<String>> {
+    let Some(value) = env::var("REVIEW_RUN_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if value.len() > MAX_REVIEW_RUN_ID_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    {
+        bail!("REVIEW_RUN_ID contains unsupported characters or is too long");
+    }
+    Ok(Some(value))
 }
 
 fn expected_head_matches(expected: Option<&str>, actual: &str) -> bool {
@@ -440,11 +459,7 @@ fn normalize_relative_path(source: &str, specifier: &str) -> Option<String> {
 
 pub fn existing_fingerprints(token: &str, repo: &str, pr: u64) -> Result<BTreeSet<String>> {
     let mut fingerprints = BTreeSet::new();
-    let bot_login = env::var("REVIEW_BOT_LOGIN")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "github-actions[bot]".to_string());
+    let bot_login = configured_bot_login();
     for page in 1..=10 {
         let url = format!(
             "https://api.github.com/repos/{repo}/pulls/{pr}/comments?per_page=100&page={page}"
@@ -459,6 +474,43 @@ pub fn existing_fingerprints(token: &str, repo: &str, pr: u64) -> Result<BTreeSe
         }
     }
     Ok(fingerprints)
+}
+
+pub fn review_run_already_posted(token: &str, repo: &str, pr: u64) -> Result<bool> {
+    let Some(run_id) = review_run_id()? else {
+        return Ok(false);
+    };
+    let marker = format!("<!-- second-opinion-run:{run_id} -->");
+    let bot_login = configured_bot_login();
+    for page in 1..=10 {
+        let url = format!(
+            "https://api.github.com/repos/{repo}/pulls/{pr}/reviews?per_page=100&page={page}"
+        );
+        let value = github_json(token, &url)?;
+        let reviews = value
+            .as_array()
+            .context("pull request reviews response was not an array")?;
+        if reviews.iter().any(|review| {
+            review["user"]["login"].as_str() == Some(bot_login.as_str())
+                && review["body"]
+                    .as_str()
+                    .is_some_and(|body| body.contains(&marker))
+        }) {
+            return Ok(true);
+        }
+        if reviews.len() < 100 {
+            break;
+        }
+    }
+    Ok(false)
+}
+
+fn configured_bot_login() -> String {
+    env::var("REVIEW_BOT_LOGIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "github-actions[bot]".to_string())
 }
 
 fn fingerprints_from_comments(comments: &[Value], bot_login: &str) -> BTreeSet<String> {
@@ -535,6 +587,9 @@ pub fn post_review(
     }
 
     let mut body = format!("## second-opinion review\n\n{}", review.summary);
+    if let Some(run_id) = review_run_id()? {
+        body.push_str(&format!("\n\n<!-- second-opinion-run:{run_id} -->"));
+    }
     if !orphaned.is_empty() {
         body.push_str("\n\n**Findings outside the diff or comment limit:**\n");
         body.push_str(&orphaned.join("\n"));
@@ -771,5 +826,18 @@ mod tests {
         let (bytes, truncated) = read_prefix(&b"1234"[..], 4).unwrap();
         assert_eq!(bytes, b"1234");
         assert!(!truncated);
+    }
+
+    #[test]
+    fn run_id_validation_rejects_marker_injection() {
+        // Test the same allowlist without mutating process-global environment in parallel tests.
+        let valid = "123:42:abcdef";
+        assert!(valid
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte)));
+        let invalid = "abc --> injected";
+        assert!(!invalid
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte)));
     }
 }

@@ -93,6 +93,7 @@ runs:
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_EVENT_PATH: ${{ github.event_path }}
         EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        REVIEW_RUN_ID: ${{ github.repository_id }}:${{ github.event.pull_request.number }}:${{ github.event.pull_request.head.sha }}
         REVIEW_API_KEY: ${{ inputs.api-key }}
         REVIEW_PROVIDER: ${{ inputs.provider }}
         REVIEW_MODEL: ${{ inputs.model }}

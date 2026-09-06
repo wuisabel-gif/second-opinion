@@ -12,6 +12,7 @@ import {
   JsonStore,
   loadConfig,
   reviewerEnvironment,
+  rollbackReviewReservation,
   reserveReview,
   spawnReviewer,
   verifyWebhookSignature,
@@ -212,6 +213,29 @@ test('reservation enforces enablement, idempotency, and monthly quota', async (c
   });
 });
 
+test('rolling back queue admission restores quota and removes the queued record', async (context) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'second-opinion-hosted-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const store = new JsonStore(path.join(directory, 'state.json'));
+  await store.init();
+  await store.update((state) => {
+    state.installations['4'] = {
+      id: '4', enabled: true, provider: 'openai', model: 'test', plan: 'free',
+    };
+  });
+  const reservation = await reserveReview(store, {
+    installationId: 4,
+    repositoryId: 9,
+    repository: 'owner/repo',
+    pullNumber: 2,
+    headSha: 'abc',
+  }, 10);
+  assert.equal(reservation.accepted, true);
+  assert.equal(await rollbackReviewReservation(store, reservation), true);
+  assert.equal(await store.read((state) => state.jobs[reservation.jobKey]), undefined);
+  assert.equal(await store.read((state) => state.usage[reservation.usageKey]), undefined);
+});
+
 test('signed installation webhook records the installer and defaults to disabled', async (context) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'second-opinion-hosted-'));
   context.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -230,12 +254,30 @@ test('signed installation webhook records the installer and defaults to disabled
   const server = createServer(config, store);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   context.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+  const outOfOrder = JSON.stringify({
+    action: 'suspend',
+    installation: { id: 12, account: { login: 'example' }, updated_at: '2026-09-06T09:00:00Z' },
+    sender: { id: 999 },
+  });
+  const ignored = await fetch(`http://127.0.0.1:${address.port}/github/webhooks`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-github-event': 'installation',
+      'x-github-delivery': 'delivery-before-created',
+      'x-hub-signature-256': webhookSignature(config.webhookSecret, outOfOrder),
+    },
+    body: outOfOrder,
+  });
+  assert.deepEqual(await ignored.json(), { accepted: false, reason: 'lifecycle_before_created' });
+  assert.equal(await store.read((state) => state.installations['12']), undefined);
+
   const body = JSON.stringify({
     action: 'created',
     installation: { id: 12, account: { login: 'example' }, updated_at: '2026-09-06T08:00:00Z' },
     sender: { id: 34 },
   });
-  const address = server.address();
   const response = await fetch(`http://127.0.0.1:${address.port}/github/webhooks`, {
     method: 'POST',
     headers: {

@@ -26,11 +26,13 @@ after cost alerts and customer-visible usage records exist.
 3. GitHub sends a `pull_request` webhook. The service checks the HMAC-SHA256 signature over the
    unmodified bytes before parsing JSON.
 4. The service deduplicates signed `X-GitHub-Delivery` IDs, rejects unsupported actions and drafts,
-   applies the per-installation burst limit, then reserves the `(installation, repository, pull
-   request, head SHA)` idempotency key and one monthly quota unit in persistent state.
+   reserves bounded in-memory queue capacity, then atomically records the `(installation,
+   repository, pull request, head SHA)` idempotency key and one monthly quota unit. If queue commit
+   loses a shutdown race, both the quota and delivery reservation are rolled back for redelivery.
 5. A worker creates a one-hour installation token restricted to the event repository and to
    `contents: read` plus `pull_requests: write`. It verifies the current head SHA before starting.
-6. The existing Rust binary fetches the diff, repository context, and trusted base `REVIEW.md`;
+6. The existing Rust binary first checks for a bot-authored durable run marker for this exact job,
+   then fetches the diff, repository context, and trusted base `REVIEW.md`;
    verifies the expected head before model execution and again before posting; invokes the
    configured API provider or internal Codex broker; normalizes `{ summary, findings }`; and posts the review with GitHub's
    `commit_id` set to the reviewed head SHA.
@@ -73,7 +75,9 @@ The reference service atomically replaces a mode-`0600` JSON state file and seri
 inside one process. It stores installation settings, monthly counters, encrypted user sessions,
 and job status. Jobs expire after 30 days, usage buckets after the month changes, and sessions
 after eight hours. Interrupted `running` jobs are changed back to `queued` during single-instance
-startup. The worker pool has bounded concurrency, bounded pending work, a hard review timeout, and
+startup. If the prior process posted before crashing, the durable GitHub run marker makes the retry
+exit before another model call or review; otherwise the job resumes. The worker pool has bounded
+concurrency, two-phase queue admission, bounded pending work, a hard review timeout, and
 SIGTERM-to-SIGKILL escalation.
 
 This is intentionally a single-instance alpha design. Before public signup:
@@ -94,6 +98,9 @@ This is intentionally a single-instance alpha design. Before public signup:
 | Forged or modified webhook | HMAC over raw bytes; reject before JSON parsing | Rotate leaked webhook secrets |
 | Duplicate delivery and cost amplification | Head-SHA idempotency, quota reservation, burst limit | Shared transactional controls before horizontal scaling |
 | Replayed/out-of-order lifecycle event | Bounded delivery-ID history and monotonic installation timestamps | Reconcile against GitHub before multi-instance deployment |
+| Non-installer lifecycle sender claims ownership | Only `installation.created` can establish the immutable manager ID; other first-seen actions are ignored | GitHub organization policy still controls who may install Apps |
+| Crash after GitHub post but before local success write | Bot-authored per-job run marker is checked before model execution | Marker lookup depends on GitHub API availability and fails closed |
+| Queue saturation charges unused quota | Capacity is reserved before durable quota; shutdown races roll back quota and delivery ID | Multi-instance launch requires a transactional shared queue |
 | Prompt injection in a diff | Existing prompt marks diff/context untrusted; trusted policy comes from base | Models can still fail; do not grant worker privileges beyond review posting |
 | Provider-key disclosure | Server-only secret, allowlisted child environment, no payload logging | Isolate workers and scan logs/support tooling |
 | Installation-token abuse | One-hour GitHub token restricted to one repository and minimal permissions | Compromised worker can act until expiry |

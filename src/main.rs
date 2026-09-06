@@ -49,6 +49,10 @@ fn main() -> Result<()> {
         eprintln!("Pull request head changed before review input was loaded; skipping stale job.");
         return Ok(());
     }
+    if github::review_run_already_posted(&github_token, &repo, pr_number)? {
+        eprintln!("This pull request revision already has a completed second-opinion review.");
+        return Ok(());
+    }
     let input = github::load_review_input(&github_token, &repo, pr_number)?;
     if input.diff.trim().is_empty() {
         eprintln!("Empty diff, nothing to review.");
