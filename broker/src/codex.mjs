@@ -35,6 +35,7 @@ export class ConcurrencyGate {
     this.active = 0;
     this.queue = [];
     this.closed = false;
+    this.idleWaiters = [];
   }
 
   async acquire() {
@@ -55,6 +56,7 @@ export class ConcurrencyGate {
       next.resolve(() => this.release());
     } else {
       this.active = Math.max(0, this.active - 1);
+      this.notifyIdle();
     }
   }
 
@@ -63,6 +65,17 @@ export class ConcurrencyGate {
     for (const waiter of this.queue.splice(0)) {
       waiter.reject(new InputError('broker is shutting down', 503, 'unavailable'));
     }
+    this.notifyIdle();
+  }
+
+  waitForIdle() {
+    if (this.active === 0 && this.queue.length === 0) return Promise.resolve();
+    return new Promise((resolve) => this.idleWaiters.push(resolve));
+  }
+
+  notifyIdle() {
+    if (this.active !== 0 || this.queue.length !== 0) return;
+    for (const resolve of this.idleWaiters.splice(0)) resolve();
   }
 }
 
@@ -109,24 +122,49 @@ function restrictedEnvironment(root, codexHome, tempDir) {
     NO_COLOR: '1',
     RUST_BACKTRACE: '0',
   };
-  for (const name of ['SSL_CERT_FILE', 'CODEX_CA_CERTIFICATE']) {
+  for (const name of [
+    'SSL_CERT_FILE',
+    'SSL_CERT_DIR',
+    'CODEX_CA_CERTIFICATE',
+    'HTTPS_PROXY',
+    'HTTP_PROXY',
+    'ALL_PROXY',
+    'NO_PROXY',
+  ]) {
     if (process.env[name]) env[name] = process.env[name];
   }
   return env;
 }
 
-async function executeChild(child, prompt, timeoutMs, maxStreamBytes) {
+function signalProcessTree(child, signal) {
+  if (process.platform !== 'win32' && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to the direct child when no process group exists.
+    }
+  }
+  child.kill(signal);
+}
+
+async function executeChild(child, prompt, timeoutMs, maxStreamBytes, abortSignal) {
   let streamBytes = 0;
-  let overflow = false;
+  let terminationReason = null;
+  let killTimer;
+  const terminate = (reason) => {
+    terminationReason ||= reason;
+    signalProcessTree(child, 'SIGTERM');
+    killTimer ||= setTimeout(() => signalProcessTree(child, 'SIGKILL'), 2000);
+    killTimer.unref();
+  };
   for (const stream of [child.stdout, child.stderr]) {
     stream.on('data', (chunk) => {
       streamBytes += chunk.length;
-      if (streamBytes > maxStreamBytes && !overflow) {
-        overflow = true;
-        child.kill('SIGTERM');
-      }
+      if (streamBytes > maxStreamBytes) terminate('overflow');
     });
   }
+  child.stdin.on('error', () => terminate('stdin'));
 
   const result = new Promise((resolve, reject) => {
     child.once('error', reject);
@@ -134,24 +172,26 @@ async function executeChild(child, prompt, timeoutMs, maxStreamBytes) {
   });
   child.stdin.end(prompt);
 
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill('SIGTERM');
-    setTimeout(() => child.kill('SIGKILL'), 2000).unref();
-  }, timeoutMs);
+  const timer = setTimeout(() => terminate('timeout'), timeoutMs);
   timer.unref();
+  const abort = () => terminate('cancelled');
+  abortSignal?.addEventListener('abort', abort, { once: true });
+  if (abortSignal?.aborted) abort();
   try {
     const status = await result;
-    if (timedOut) throw new Error('Codex review timed out');
-    if (overflow) throw new Error('Codex process output exceeded its size limit');
+    if (terminationReason === 'timeout') throw new Error('Codex review timed out');
+    if (terminationReason === 'overflow') throw new Error('Codex process output exceeded its size limit');
+    if (terminationReason === 'cancelled') throw new Error('Codex review was cancelled');
+    if (terminationReason === 'stdin') throw new Error('Codex stopped before reading the review prompt');
     if (status.code !== 0) throw new Error(`Codex exited unsuccessfully (${status.code ?? status.signal ?? 'unknown'})`);
   } finally {
     clearTimeout(timer);
+    clearTimeout(killTimer);
+    abortSignal?.removeEventListener('abort', abort);
   }
 }
 
-export async function runCodex({ authJson, prompt, model, config }) {
+export async function runCodex({ authJson, prompt, model, config, signal }) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'second-opinion-broker-'));
   const codexHome = path.join(root, 'codex-home');
   const workspace = path.join(root, 'workspace');
@@ -179,11 +219,12 @@ export async function runCodex({ authJson, prompt, model, config }) {
         cwd: workspace,
         env: restrictedEnvironment(root, codexHome, tempDir),
         stdio: ['pipe', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
         windowsHide: true,
       },
     );
     try {
-      await executeChild(child, prompt, config.codexTimeoutMs, config.maxOutputBytes);
+      await executeChild(child, prompt, config.codexTimeoutMs, config.maxOutputBytes, signal);
       output = await readBoundedFile(outputPath, config.maxOutputBytes, 'Codex review output');
     } catch (error) {
       executionError = error;

@@ -9,6 +9,10 @@ permissions:
   id-token: write
   pull-requests: write
 
+concurrency:
+  group: second-opinion-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   review:
     runs-on: ubuntu-latest

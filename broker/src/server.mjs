@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.mjs';
 import {
   consumeOidcAndRateLimit,
+  consumeServiceRateLimit,
   createDatabase,
+  ensureServiceRegistration,
   getRegistration,
   migrate,
   updateCredential,
@@ -77,30 +80,65 @@ function parseReviewOutput(output) {
   return parsed;
 }
 
+export function serviceTokenAllowed(header, expected) {
+  if (!expected) return false;
+  let supplied;
+  try {
+    supplied = bearerToken(header);
+  } catch {
+    return false;
+  }
+  const left = Buffer.from(supplied);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
 export function createBroker({ config, pool, deps = {} }) {
   const verifyOidc = deps.verifyOidc ?? verifyGithubOidc;
   const findRegistration = deps.getRegistration ?? getRegistration;
+  const ensureService = deps.ensureServiceRegistration ?? ensureServiceRegistration;
   const consumeRate = deps.consumeOidcAndRateLimit ?? consumeOidcAndRateLimit;
+  const consumeServiceRate = deps.consumeServiceRateLimit ?? consumeServiceRateLimit;
   const withCredential = deps.withCredentialLock ?? withCredentialLock;
   const executeCodex = deps.runCodex ?? runCodex;
   const readyCheck = deps.ready ?? (async () => {
     await pool.query('SELECT 1');
   });
   const gate = deps.gate ?? new ConcurrencyGate(config.maxConcurrency, config.maxQueue);
+  const shutdownController = new AbortController();
 
-  async function handleReview(request, response) {
-    if (request.headers['x-second-opinion-protocol'] !== PROTOCOL_VERSION) {
+  async function handleReview(request, response, authMode) {
+    if (authMode === 'oidc' && request.headers['x-second-opinion-protocol'] !== PROTOCOL_VERSION) {
       throw new InputError('unsupported broker protocol', 400, 'unsupported_protocol');
     }
-    const claims = await verifyOidc(bearerToken(request.headers.authorization), config);
+    let claims = null;
+    if (authMode === 'oidc') {
+      claims = await verifyOidc(bearerToken(request.headers.authorization), config);
+    } else if (!serviceTokenAllowed(request.headers.authorization, config.serviceToken)) {
+      throw new InputError('service authentication failed', 401, 'unauthorized');
+    }
     const payload = await readBoundedBody(request, config.maxBodyBytes);
     const input = validateReviewPayload(payload, config);
-    const registration = await findRegistration(pool, claims.repository);
-    // Throws when the repository is unknown, disabled, or the workflow
-    // identity does not exactly match the registered one.
-    authorizeClaims(claims, registration, input.repository);
-
-    await consumeRate(pool, claims, registration, config.perRepoHourlyLimit);
+    let registration = await findRegistration(pool, claims?.repository ?? input.repository);
+    if (authMode === 'oidc') {
+      // Throws when the repository is unknown, disabled, or the workflow
+      // identity does not exactly match the registered one.
+      authorizeClaims(claims, registration, input.repository);
+      await consumeRate(pool, claims, registration, config.perRepoHourlyLimit);
+    } else {
+      if (!registration && config.defaultCredentialId) {
+        registration = await ensureService(pool, input.repository, config.defaultCredentialId);
+      }
+      if (!registration?.enabled || registration.repository !== input.repository) {
+        throw new InputError('repository is not enrolled', 403, 'forbidden');
+      }
+      await consumeServiceRate(
+        pool,
+        registration,
+        config.perRepoHourlyLimit,
+        config.serviceHourlyLimit,
+      );
+    }
 
     const release = await gate.acquire();
     try {
@@ -112,6 +150,7 @@ export function createBroker({ config, pool, deps = {} }) {
           prompt,
           model: input.model,
           config,
+          signal: shutdownController.signal,
         });
 
         try {
@@ -160,7 +199,11 @@ export function createBroker({ config, pool, deps = {} }) {
         return;
       }
       if (request.method === 'POST' && url.pathname === '/v1/reviews') {
-        await handleReview(request, response);
+        await handleReview(request, response, 'oidc');
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/v1/internal/reviews') {
+        await handleReview(request, response, 'service');
         return;
       }
       throw new InputError('not found', 404, 'not_found');
@@ -174,27 +217,43 @@ export function createBroker({ config, pool, deps = {} }) {
 
   server.requestTimeout = config.codexTimeoutMs + 120_000;
   server.headersTimeout = 65_000;
-  return { server, gate };
+  return {
+    server,
+    gate,
+    async shutdown() {
+      gate.close();
+      shutdownController.abort();
+      await gate.waitForIdle();
+    },
+  };
 }
 
 async function main() {
   const config = loadConfig();
   const pool = createDatabase(config);
   await migrate(pool);
-  const { server, gate } = createBroker({ config, pool });
+  const { server, shutdown } = createBroker({ config, pool });
 
-  const shutdown = (signal) => {
+  let shutdownStarted = false;
+  const stop = async (signal) => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
     log('shutdown_started', { signal });
-    gate.close();
-    server.close(() => {
-      pool.end()
-        .then(() => process.exit(0))
-        .catch(() => process.exit(1));
-    });
-    setTimeout(() => process.exit(1), 10_000).unref();
+    const closed = new Promise((resolve) => server.close(resolve));
+    server.closeIdleConnections?.();
+    await shutdown();
+    await closed;
+    await pool.end();
+    log('shutdown_completed');
   };
-  process.once('SIGINT', () => shutdown('SIGINT'));
-  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => stop('SIGINT').catch((error) => {
+    logError('shutdown_failed', { message: error.message });
+    process.exitCode = 1;
+  }));
+  process.once('SIGTERM', () => stop('SIGTERM').catch((error) => {
+    logError('shutdown_failed', { message: error.message });
+    process.exitCode = 1;
+  }));
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);

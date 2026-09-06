@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { createBroker } from '../src/server.mjs';
+import { createBroker, serviceTokenAllowed } from '../src/server.mjs';
 import { encryptAuthJson } from '../src/crypto.mjs';
 import { InputError } from '../src/validation.mjs';
 import { sampleAuthJson, testConfig } from '../test-support/helpers.mjs';
@@ -52,7 +52,9 @@ function startBroker(t, depsOverrides = {}, configOverrides = {}) {
   const deps = {
     verifyOidc: async () => claims(),
     getRegistration: async () => registration,
+    ensureServiceRegistration: async () => registration,
     consumeOidcAndRateLimit: async () => {},
+    consumeServiceRateLimit: async () => {},
     ready: async () => {},
     withCredentialLock: async (_pool, _id, callback) =>
       callback(
@@ -81,7 +83,7 @@ function startBroker(t, depsOverrides = {}, configOverrides = {}) {
     }),
     ...depsOverrides,
   };
-  const { server, gate } = createBroker({ config, pool: {}, deps });
+  const { server, gate, shutdown } = createBroker({ config, pool: {}, deps });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       t.after(() => {
@@ -92,6 +94,7 @@ function startBroker(t, depsOverrides = {}, configOverrides = {}) {
         base: `http://127.0.0.1:${server.address().port}`,
         updates,
         deps,
+        shutdown,
       });
     });
   });
@@ -109,6 +112,21 @@ function postReview(base, { body = reviewBody(), headers = {} } = {}) {
     body: typeof body === 'string' ? body : JSON.stringify(body),
   });
 }
+
+function postInternalReview(base, { body = reviewBody(), token = 's'.repeat(32) } = {}) {
+  return fetch(`${base}/v1/internal/reviews`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+test('compares service bearer tokens exactly', () => {
+  assert.equal(serviceTokenAllowed(`Bearer ${'s'.repeat(32)}`, 's'.repeat(32)), true);
+  assert.equal(serviceTokenAllowed(`Bearer ${'x'.repeat(32)}`, 's'.repeat(32)), false);
+  assert.equal(serviceTokenAllowed(undefined, 's'.repeat(32)), false);
+  assert.equal(serviceTokenAllowed(`Bearer ${'s'.repeat(32)}`, null), false);
+});
 
 test('health and readiness endpoints respond without credentials', async (t) => {
   const { base } = await startBroker(t);
@@ -128,6 +146,40 @@ test('completes a review end to end with the normalized contract', async (t) => 
     summary: 'one issue found',
     findings: [{ path: 'src/a.rs', line: 2, severity: 'medium', comment: 'fix this' }],
   });
+});
+
+test('allows the hosted service endpoint with its dedicated token', async (t) => {
+  const { base } = await startBroker(t, {}, { BROKER_SERVICE_TOKEN: 's'.repeat(32) });
+  const response = await postInternalReview(base);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).summary, 'one issue found');
+});
+
+test('internal endpoint fails closed without the configured service token', async (t) => {
+  const absent = await startBroker(t);
+  assert.equal((await postInternalReview(absent.base)).status, 401);
+  const configured = await startBroker(t, {}, { BROKER_SERVICE_TOKEN: 's'.repeat(32) });
+  assert.equal((await postInternalReview(configured.base, { token: 'x'.repeat(32) })).status, 401);
+});
+
+test('hosted service can auto-enroll with the configured default credential', async (t) => {
+  let ensured;
+  const { base } = await startBroker(t, {
+    getRegistration: async () => null,
+    ensureServiceRegistration: async (_pool, repository, credentialId) => {
+      ensured = { repository, credentialId };
+      return {
+        repository,
+        credential_id: CREDENTIAL_ID,
+        enabled: true,
+      };
+    },
+  }, {
+    BROKER_SERVICE_TOKEN: 's'.repeat(32),
+    BROKER_DEFAULT_CREDENTIAL_ID: CREDENTIAL_ID,
+  });
+  assert.equal((await postInternalReview(base)).status, 200);
+  assert.deepEqual(ensured, { repository: REPOSITORY, credentialId: CREDENTIAL_ID });
 });
 
 test('rejects unknown routes and wrong methods', async (t) => {
@@ -267,4 +319,24 @@ test('skips the credential update when auth is unchanged', async (t) => {
   const { base, updates } = await startBroker(t);
   assert.equal((await postReview(base)).status, 200);
   assert.equal(updates.length, 0);
+});
+
+test('shutdown persists rotated auth before draining an active review', async (t) => {
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const rotated = sampleAuthJson('refresh-after-shutdown');
+  const { base, updates, shutdown } = await startBroker(t, {
+    runCodex: async ({ signal }) => {
+      started();
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      return { output: null, refreshedAuth: rotated, error: new Error('cancelled') };
+    },
+  });
+  const request = postReview(base);
+  await running;
+  await shutdown();
+  const response = await request;
+  assert.equal(response.status, 502);
+  assert.equal(updates.length, 1);
+  assert.match(updates[0].sql, /UPDATE broker_credentials/);
 });

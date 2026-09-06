@@ -6,13 +6,19 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Read;
 
 const MAX_DIFF_BYTES: usize = 120_000;
 const MAX_COMMENTS: usize = 15;
 const DEFAULT_CONTEXT_BYTES: usize = 60_000;
+const MAX_CONTEXT_BYTES: usize = 1_000_000;
 const MAX_SINGLE_FILE_BYTES: usize = 20_000;
 const MAX_RULES_BYTES: usize = 20_000;
 const MAX_IMPORT_FILES: usize = 12;
+const MAX_CONTEXT_BLOBS: usize = 64;
+const MAX_CHANGED_FILES: usize = 500;
+const MAX_TREE_ENTRIES: usize = 20_000;
+const MAX_GITHUB_JSON_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct ReviewInput {
     pub diff: String,
@@ -51,6 +57,28 @@ pub fn pr_number() -> Result<u64> {
         .as_u64()
         .or_else(|| event["issue"]["number"].as_u64())
         .context("could not find a PR number in the event payload")
+}
+
+pub fn head_is_expected(token: &str, repo: &str, pr: u64) -> Result<bool> {
+    let expected = expected_head_sha();
+    if expected.is_none() {
+        return Ok(true);
+    }
+    Ok(expected_head_matches(
+        expected.as_deref(),
+        &fetch_pull_refs(token, repo, pr)?.head_commit,
+    ))
+}
+
+pub fn expected_head_sha() -> Option<String> {
+    env::var("EXPECTED_HEAD_SHA")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn expected_head_matches(expected: Option<&str>, actual: &str) -> bool {
+    expected.map(|value| value == actual).unwrap_or(true)
 }
 
 pub fn load_review_input(token: &str, repo: &str, pr: u64) -> Result<ReviewInput> {
@@ -98,13 +126,17 @@ pub fn load_review_input(token: &str, repo: &str, pr: u64) -> Result<ReviewInput
 }
 
 fn context_budget() -> Result<usize> {
-    match env::var("REVIEW_CONTEXT_BYTES") {
+    let budget = match env::var("REVIEW_CONTEXT_BYTES") {
         Ok(value) if !value.trim().is_empty() => value
             .trim()
             .parse::<usize>()
             .context("REVIEW_CONTEXT_BYTES must be a non-negative integer"),
         _ => Ok(DEFAULT_CONTEXT_BYTES),
+    }?;
+    if budget > MAX_CONTEXT_BYTES {
+        bail!("REVIEW_CONTEXT_BYTES must not exceed {MAX_CONTEXT_BYTES}");
     }
+    Ok(budget)
 }
 
 fn fetch_diff(token: &str, repo: &str, pr: u64) -> Result<String> {
@@ -113,7 +145,8 @@ fn fetch_diff(token: &str, repo: &str, pr: u64) -> Result<String> {
         .set("Accept", "application/vnd.github.v3.diff")
         .call()
         .context("fetching PR diff failed")?;
-    Ok(response.into_string()?)
+    let (bytes, _) = read_response_prefix(response, MAX_DIFF_BYTES)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn fetch_pull_refs(token: &str, repo: &str, pr: u64) -> Result<PullRefs> {
@@ -168,6 +201,9 @@ fn fetch_changed_files(token: &str, repo: &str, pr: u64) -> Result<Vec<ChangedFi
                     path: path.to_string(),
                     sha: sha.to_string(),
                 });
+                if files.len() >= MAX_CHANGED_FILES {
+                    return Ok(files);
+                }
             }
         }
         if entries.len() < 100 {
@@ -190,7 +226,7 @@ fn fetch_tree(
         .as_array()
         .context("tree response missing entries")?;
     let mut tree = BTreeMap::new();
-    for entry in entries {
+    for entry in entries.iter().take(MAX_TREE_ENTRIES) {
         if entry["type"] == "blob" {
             if let (Some(path), Some(blob_sha)) = (entry["path"].as_str(), entry["sha"].as_str()) {
                 tree.insert(path.to_string(), blob_sha.to_string());
@@ -200,10 +236,22 @@ fn fetch_tree(
     Ok(tree)
 }
 
-fn fetch_blob(token: &str, repo: &str, sha: &str) -> Result<Option<String>> {
+fn fetch_blob(token: &str, repo: &str, sha: &str, max_bytes: usize) -> Result<Option<String>> {
     let url = format!("https://api.github.com/repos/{repo}/git/blobs/{sha}");
-    let value = github_json(token, &url)?;
+    let response = github_request(token, &url)
+        .call()
+        .with_context(|| format!("GitHub request failed: {url}"))?;
+    let maximum_response = max_bytes.saturating_mul(2).saturating_add(8 * 1024);
+    let (bytes, truncated) = read_response_prefix(response, maximum_response)?;
+    if truncated {
+        return Ok(None);
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).context("GitHub blob response was not JSON")?;
     if value["encoding"] != "base64" {
+        return Ok(None);
+    }
+    if value["size"].as_u64().unwrap_or(u64::MAX) > max_bytes as u64 {
         return Ok(None);
     }
     let encoded = value["content"]
@@ -211,6 +259,9 @@ fn fetch_blob(token: &str, repo: &str, sha: &str) -> Result<Option<String>> {
         .context("blob response missing content")?
         .replace('\n', "");
     let bytes = STANDARD.decode(encoded).context("invalid base64 blob")?;
+    if bytes.len() > max_bytes {
+        return Ok(None);
+    }
     Ok(String::from_utf8(bytes).ok())
 }
 
@@ -219,9 +270,7 @@ fn fetch_review_rules(token: &str, repo: &str, base_sha: &str) -> Result<String>
     let Some(blob_sha) = tree.get("REVIEW.md") else {
         return Ok(String::new());
     };
-    Ok(fetch_blob(token, repo, blob_sha)?
-        .map(|rules| truncate_utf8(&rules, MAX_RULES_BYTES))
-        .unwrap_or_default())
+    Ok(fetch_blob(token, repo, blob_sha, MAX_RULES_BYTES)?.unwrap_or_default())
 }
 
 fn fetch_repository_context(
@@ -237,14 +286,19 @@ fn fetch_repository_context(
     let mut output = String::new();
     let mut changed_contents = Vec::new();
 
+    let mut attempted_blobs = 0_usize;
     for file in &changed {
         if output.len() >= budget {
             break;
         }
-        let Some(content) = fetch_blob(token, content_repo, &file.sha)? else {
+        if attempted_blobs >= MAX_CONTEXT_BLOBS {
+            break;
+        }
+        attempted_blobs += 1;
+        let maximum = MAX_SINGLE_FILE_BYTES.min(budget.saturating_sub(output.len()));
+        let Some(content) = fetch_blob(token, content_repo, &file.sha, maximum)? else {
             continue;
         };
-        let content = truncate_utf8(&content, MAX_SINGLE_FILE_BYTES);
         append_file_context(&mut output, &file.path, &content, budget);
         changed_contents.push((file.path.clone(), content));
     }
@@ -261,10 +315,14 @@ fn fetch_repository_context(
         let Some(blob_sha) = tree.get(&path) else {
             continue;
         };
-        let Some(content) = fetch_blob(token, content_repo, blob_sha)? else {
+        if attempted_blobs >= MAX_CONTEXT_BLOBS {
+            break;
+        }
+        attempted_blobs += 1;
+        let maximum = (MAX_SINGLE_FILE_BYTES / 2).min(budget.saturating_sub(output.len()));
+        let Some(content) = fetch_blob(token, content_repo, blob_sha, maximum)? else {
             continue;
         };
-        let content = truncate_utf8(&content, MAX_SINGLE_FILE_BYTES / 2);
         append_file_context(
             &mut output,
             &format!("{path} (direct import)"),
@@ -444,6 +502,7 @@ pub fn post_review(
     pr: u64,
     review: ReviewOutput,
     commentable: &BTreeMap<String, BTreeSet<u64>>,
+    commit_id: Option<&str>,
 ) -> Result<()> {
     let mut comments = Vec::new();
     let mut orphaned = Vec::new();
@@ -482,7 +541,10 @@ pub fn post_review(
     }
 
     let url = format!("https://api.github.com/repos/{repo}/pulls/{pr}/reviews");
-    let payload = json!({ "event": "COMMENT", "body": body, "comments": comments });
+    let mut payload = json!({ "event": "COMMENT", "body": body, "comments": comments });
+    if let Some(commit_id) = commit_id {
+        payload["commit_id"] = json!(commit_id);
+    }
     let result = github_post_request(token, &url).send_json(payload);
     match result {
         Ok(_) => {
@@ -499,8 +561,12 @@ pub fn post_review(
                 fallback_body.push_str("\n\n**Line findings:**\n");
                 fallback_body.push_str(&fallback_findings.join("\n"));
             }
+            let mut fallback_payload = json!({ "event": "COMMENT", "body": fallback_body });
+            if let Some(commit_id) = commit_id {
+                fallback_payload["commit_id"] = json!(commit_id);
+            }
             github_post_request(token, &url)
-                .send_json(json!({ "event": "COMMENT", "body": fallback_body }))
+                .send_json(fallback_payload)
                 .context("fallback summary review also failed")?;
             Ok(())
         }
@@ -528,7 +594,28 @@ fn github_json(token: &str, url: &str) -> Result<Value> {
     let response = github_request(token, url)
         .call()
         .with_context(|| format!("GitHub request failed: {url}"))?;
-    Ok(response.into_json()?)
+    let (bytes, truncated) = read_response_prefix(response, MAX_GITHUB_JSON_BYTES)?;
+    if truncated {
+        bail!("GitHub response exceeded {MAX_GITHUB_JSON_BYTES} bytes: {url}");
+    }
+    serde_json::from_slice(&bytes).context("GitHub response was not valid JSON")
+}
+
+fn read_response_prefix(response: ureq::Response, max: usize) -> Result<(Vec<u8>, bool)> {
+    read_prefix(response.into_reader(), max)
+}
+
+fn read_prefix(reader: impl Read, max: usize) -> Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::with_capacity(max.min(64 * 1024));
+    reader
+        .take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .context("could not read GitHub response")?;
+    let truncated = bytes.len() > max;
+    if truncated {
+        bytes.truncate(max);
+    }
+    Ok((bytes, truncated))
 }
 
 fn commentable_lines(diff: &str) -> BTreeMap<String, BTreeSet<u64>> {
@@ -667,5 +754,22 @@ mod tests {
         ];
         let values = fingerprints_from_comments(&comments, "github-actions[bot]");
         assert_eq!(values, BTreeSet::from(["trusted".to_string()]));
+    }
+
+    #[test]
+    fn expected_head_prevents_stale_hosted_reviews() {
+        assert!(expected_head_matches(None, "head"));
+        assert!(expected_head_matches(Some("head"), "head"));
+        assert!(!expected_head_matches(Some("old"), "head"));
+    }
+
+    #[test]
+    fn response_reader_never_keeps_more_than_its_limit() {
+        let (bytes, truncated) = read_prefix(&b"123456"[..], 4).unwrap();
+        assert_eq!(bytes, b"1234");
+        assert!(truncated);
+        let (bytes, truncated) = read_prefix(&b"1234"[..], 4).unwrap();
+        assert_eq!(bytes, b"1234");
+        assert!(!truncated);
     }
 }

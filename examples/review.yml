@@ -9,6 +9,12 @@ permissions:
   id-token: write # Required only when REVIEW_BROKER_URL selects codex-broker.
   pull-requests: write
 
+# Serializes direct Codex runs that share one rotating refresh-token chain.
+# Broker and API-key deployments may choose a narrower per-PR group instead.
+concurrency:
+  group: second-opinion-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   review:
     runs-on: ubuntu-latest

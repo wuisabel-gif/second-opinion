@@ -70,3 +70,25 @@ test('validates integer bounds', () => {
   assert.throws(() => testConfig({ PORT: '0' }), /PORT must be an integer/);
   assert.throws(() => testConfig({ BROKER_MAX_CONCURRENCY: 'nope' }), /BROKER_MAX_CONCURRENCY/);
 });
+
+test('accepts only a sufficiently long optional service token', () => {
+  assert.equal(testConfig().serviceToken, null);
+  assert.throws(() => testConfig({ BROKER_SERVICE_TOKEN: 'too-short' }), /at least 32 bytes/);
+  assert.equal(testConfig({ BROKER_SERVICE_TOKEN: 'x'.repeat(32) }).serviceToken, 'x'.repeat(32));
+});
+
+test('default hosted credential requires a UUID and service token', () => {
+  assert.throws(
+    () => testConfig({ BROKER_DEFAULT_CREDENTIAL_ID: 'not-a-uuid' }),
+    /must be a UUID/,
+  );
+  assert.throws(
+    () => testConfig({ BROKER_DEFAULT_CREDENTIAL_ID: '10000000-0000-4000-8000-000000000000' }),
+    /requires BROKER_SERVICE_TOKEN/,
+  );
+  const config = testConfig({
+    BROKER_SERVICE_TOKEN: 's'.repeat(32),
+    BROKER_DEFAULT_CREDENTIAL_ID: '10000000-0000-4000-8000-000000000000',
+  });
+  assert.equal(config.defaultCredentialId, '10000000-0000-4000-8000-000000000000');
+});

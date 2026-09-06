@@ -75,7 +75,7 @@ runs:
       uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
     - name: Install isolated Codex CLI
-      if: ${{ inputs.provider == 'codex' || inputs.provider == 'codex-cli' || inputs.provider == 'chatgpt-subscription' }}
+      if: ${{ inputs.codex-auth-json != '' }}
       shell: bash
       env:
         CODEX_VERSION: ${{ inputs.codex-version }}
@@ -92,6 +92,7 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_EVENT_PATH: ${{ github.event_path }}
+        EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         REVIEW_API_KEY: ${{ inputs.api-key }}
         REVIEW_PROVIDER: ${{ inputs.provider }}
         REVIEW_MODEL: ${{ inputs.model }}

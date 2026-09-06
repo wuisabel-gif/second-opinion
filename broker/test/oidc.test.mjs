@@ -88,7 +88,10 @@ test('enforces job_workflow_ref only when registered', () => {
   assert.throws(() => authorizeClaims(claims(), reg, 'owner/repo'), InputError);
 });
 
-test('skips repository_id verification when not registered', () => {
+test('rejects OIDC authorization when immutable repository_id is not registered', () => {
   const reg = registration({ repository_id: null });
-  assert.equal(authorizeClaims(claims({ repository_id: 'anything' }), reg, 'owner/repo'), true);
+  assert.throws(
+    () => authorizeClaims(claims({ repository_id: 'anything' }), reg, 'owner/repo'),
+    (error) => error instanceof InputError && error.statusCode === 403,
+  );
 });

@@ -51,8 +51,10 @@ function validateUuid(value, name) {
 
 function validateRegistration(repository, flags) {
   const credentialId = validateUuid(requiredFlag(flags, 'credential-id'), '--credential-id');
-  const repositoryIdRaw = flags.get('repository-id')?.trim() || '';
-  if (repositoryIdRaw && !/^\d+$/.test(repositoryIdRaw)) throw new Error('--repository-id must be numeric');
+  const repositoryIdRaw = requiredFlag(flags, 'repository-id');
+  if (!/^\d+$/.test(repositoryIdRaw) || repositoryIdRaw === '0') {
+    throw new Error('--repository-id must be a positive numeric GitHub repository ID');
+  }
   const workflowRef = requiredFlag(flags, 'workflow-ref');
   if (!workflowRef.startsWith(`${repository}/.github/workflows/`) || !workflowRef.includes('@refs/heads/')) {
     throw new Error('--workflow-ref must be an exact owner/repo/.github/workflows/file.yml@refs/heads/branch value');
@@ -64,7 +66,7 @@ function validateRegistration(repository, flags) {
   const jobWorkflowRef = flags.get('job-workflow-ref')?.trim() || null;
   return {
     credentialId,
-    repositoryId: repositoryIdRaw || null,
+    repositoryId: repositoryIdRaw,
     workflowRef,
     trustedRef,
     eventName,

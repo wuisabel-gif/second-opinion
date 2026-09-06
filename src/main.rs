@@ -45,9 +45,17 @@ fn main() -> Result<()> {
         model
     );
 
+    if !github::head_is_expected(&github_token, &repo, pr_number)? {
+        eprintln!("Pull request head changed before review input was loaded; skipping stale job.");
+        return Ok(());
+    }
     let input = github::load_review_input(&github_token, &repo, pr_number)?;
     if input.diff.trim().is_empty() {
         eprintln!("Empty diff, nothing to review.");
+        return Ok(());
+    }
+    if !github::head_is_expected(&github_token, &repo, pr_number)? {
+        eprintln!("Pull request head changed while review input was loaded; skipping stale job.");
         return Ok(());
     }
 
@@ -65,6 +73,10 @@ fn main() -> Result<()> {
         passes,
         threshold,
     )?;
+    if !github::head_is_expected(&github_token, &repo, pr_number)? {
+        eprintln!("Pull request head changed during model execution; discarding stale review.");
+        return Ok(());
+    }
 
     let existing = match github::existing_fingerprints(&github_token, &repo, pr_number) {
         Ok(existing) => existing,
@@ -84,6 +96,13 @@ fn main() -> Result<()> {
         ));
     }
 
-    github::post_review(&github_token, &repo, pr_number, review, &input.commentable)?;
+    github::post_review(
+        &github_token,
+        &repo,
+        pr_number,
+        review,
+        &input.commentable,
+        github::expected_head_sha().as_deref(),
+    )?;
     Ok(())
 }

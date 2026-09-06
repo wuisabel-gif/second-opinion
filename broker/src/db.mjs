@@ -50,6 +50,18 @@ export async function getRegistration(pool, repository) {
   return result.rows[0] ?? null;
 }
 
+export async function ensureServiceRegistration(pool, repository, credentialId) {
+  await pool.query(
+    `INSERT INTO broker_repositories
+       (repository, repository_id, credential_id, workflow_ref, job_workflow_ref,
+        trusted_ref, event_name, enabled)
+     VALUES ($1, NULL, $2, NULL, NULL, '', 'hosted_service', TRUE)
+     ON CONFLICT (repository) DO NOTHING`,
+    [repository, credentialId],
+  );
+  return getRegistration(pool, repository);
+}
+
 export async function consumeOidcAndRateLimit(pool, claims, registration, hourlyLimit) {
   const client = await pool.connect();
   try {
@@ -74,19 +86,54 @@ export async function consumeOidcAndRateLimit(pool, claims, registration, hourly
       throw new InputError('OIDC token has already been used', 401, 'oidc_replay');
     }
 
-    const usage = await client.query(
+    await consumeRateWithinTransaction(client, registration, hourlyLimit);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function consumeRateWithinTransaction(client, registration, hourlyLimit, source = 'oidc') {
+  const usage = await client.query(
+    `SELECT count(*)::integer AS count
+       FROM broker_usage_events
+      WHERE repository = $1
+        AND requested_at >= now() - interval '1 hour'`,
+    [registration.repository],
+  );
+  if (usage.rows[0].count >= hourlyLimit) {
+    throw new InputError('repository review rate limit exceeded', 429, 'rate_limited');
+  }
+  await client.query('INSERT INTO broker_usage_events (repository, source) VALUES ($1, $2)', [
+    registration.repository,
+    source,
+  ]);
+}
+
+export async function consumeServiceRateLimit(pool, registration, hourlyLimit, globalHourlyLimit) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      'rate:service:global',
+    ]);
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      `rate:${registration.repository}`,
+    ]);
+    await client.query("DELETE FROM broker_usage_events WHERE requested_at < now() - interval '2 hours'");
+    const globalUsage = await client.query(
       `SELECT count(*)::integer AS count
          FROM broker_usage_events
-        WHERE repository = $1
+        WHERE source = 'service'
           AND requested_at >= now() - interval '1 hour'`,
-      [registration.repository],
     );
-    if (usage.rows[0].count >= hourlyLimit) {
-      throw new InputError('repository review rate limit exceeded', 429, 'rate_limited');
+    if (globalUsage.rows[0].count >= globalHourlyLimit) {
+      throw new InputError('hosted service review rate limit exceeded', 429, 'rate_limited');
     }
-    await client.query('INSERT INTO broker_usage_events (repository) VALUES ($1)', [
-      registration.repository,
-    ]);
+    await consumeRateWithinTransaction(client, registration, hourlyLimit, 'service');
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});

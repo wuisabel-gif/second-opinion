@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { InputError } from './validation.mjs';
+import { InputError, validateRepository } from './validation.mjs';
 
 let cachedJwks;
 let cachedUrl;
@@ -32,6 +32,12 @@ export async function verifyGithubOidc(token, config) {
       clockTolerance: 5,
       requiredClaims: ['exp', 'iat', 'jti', 'repository', 'repository_id', 'workflow_ref', 'event_name', 'ref'],
     });
+    for (const name of ['jti', 'repository', 'repository_id', 'workflow_ref', 'event_name', 'ref']) {
+      if (typeof payload[name] !== 'string' || !payload[name]) {
+        throw new Error(`invalid ${name} claim`);
+      }
+    }
+    validateRepository(payload.repository);
     return payload;
   } catch {
     throw new InputError('OIDC token verification failed', 401, 'unauthorized');
@@ -52,9 +58,10 @@ export function authorizeClaims(claims, registration, payloadRepository) {
   if (payloadRepository !== undefined && payloadRepository !== registration.repository) {
     throw new InputError('request repository does not match OIDC identity', 403, 'forbidden');
   }
-  if (registration.repository_id !== null && registration.repository_id !== undefined) {
-    exactClaim(claims, 'repository_id', String(registration.repository_id));
+  if (registration.repository_id === null || registration.repository_id === undefined) {
+    throw new InputError('workflow identity is not authorized', 403, 'forbidden');
   }
+  exactClaim(claims, 'repository_id', String(registration.repository_id));
   exactClaim(claims, 'workflow_ref', registration.workflow_ref);
   exactClaim(claims, 'event_name', registration.event_name);
   exactClaim(claims, 'ref', registration.trusted_ref);

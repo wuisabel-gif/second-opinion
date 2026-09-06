@@ -24,6 +24,20 @@ The reusable action can also be added directly:
 
 Pinning a full commit SHA instead of a release tag provides the strongest supply-chain protection. The installation workflow uses `pull_request_target` but never checks out or executes the pull request head; it treats the fetched diff only as review input.
 
+### Optional hosted GitHub App
+
+The repository also includes a deployable private-alpha hosted service for one-click GitHub App
+installation and service-owned provider credentials. It verifies signed `pull_request` webhooks,
+enforces per-installation quotas and idempotency, creates repository-scoped installation tokens,
+and invokes the same reviewer and normalized output contract. It can route reviews through the
+Codex broker, so App users add no repository API key or `auth.json`. Existing Action and self-hosted
+paths remain unchanged.
+
+Start with [`hosted/README.md`](hosted/README.md). The
+[`architecture and threat model`](docs/hosted-service.md),
+[`privacy and retention policy`](docs/privacy.md), and
+[`migration guide`](docs/hosted-migration.md) define the alpha boundaries and public-launch gates.
+
 ## How it works
 
 1. The workflow triggers on `pull_request_target` events and runs the trusted, versioned reviewer action.
@@ -152,7 +166,7 @@ Responses wrapped in `review`, `output`, `result`, or `data` are also accepted, 
 - `REVIEW_RESPONSE_JSON_POINTER`: optional RFC 6901 JSON Pointer for extracting a normalized review from a custom webhook response.
 - `REVIEW_PASSES`: independent model calls per review, from 1 to 7; defaults to `1`.
 - `REVIEW_VOTE_THRESHOLD`: passes that must report the same path and line; defaults to a strict majority.
-- `REVIEW_CONTEXT_BYTES`: repository-context budget; defaults to `60000`, and `0` disables context fetching.
+- `REVIEW_CONTEXT_BYTES`: repository-context budget; defaults to `60000`, `0` disables context fetching, and the hard maximum is `1000000`.
 - `REVIEW_BOT_LOGIN`: only this author's hidden fingerprints are trusted for deduplication; defaults to `github-actions[bot]`.
 - Diff and line-comment limits are bounded internally to control request and GitHub API sizes.
 

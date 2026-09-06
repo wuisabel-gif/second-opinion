@@ -79,6 +79,18 @@ export function loadConfig(env = process.env) {
     throw new Error('BROKER_DEFAULT_MODEL must be in BROKER_ALLOWED_MODELS');
   }
   const keyring = parseKeyring(env);
+  const serviceToken = env.BROKER_SERVICE_TOKEN?.trim() || null;
+  if (serviceToken && Buffer.byteLength(serviceToken) < 32) {
+    throw new Error('BROKER_SERVICE_TOKEN must contain at least 32 bytes');
+  }
+  const defaultCredentialId = env.BROKER_DEFAULT_CREDENTIAL_ID?.trim() || null;
+  if (defaultCredentialId
+    && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(defaultCredentialId)) {
+    throw new Error('BROKER_DEFAULT_CREDENTIAL_ID must be a UUID');
+  }
+  if (defaultCredentialId && !serviceToken) {
+    throw new Error('BROKER_DEFAULT_CREDENTIAL_ID requires BROKER_SERVICE_TOKEN');
+  }
   return Object.freeze({
     port: integer('PORT', 3000, { min: 1, max: 65535 }, env),
     databaseUrl,
@@ -86,6 +98,8 @@ export function loadConfig(env = process.env) {
     oidcIssuer: 'https://token.actions.githubusercontent.com',
     oidcJwksUrl: 'https://token.actions.githubusercontent.com/.well-known/jwks',
     keyring,
+    serviceToken,
+    defaultCredentialId,
     allowedModels: new Set(allowedModels),
     defaultModel,
     codexBin: env.CODEX_BIN?.trim() || 'codex',
@@ -101,6 +115,7 @@ export function loadConfig(env = process.env) {
     maxConcurrency: integer('BROKER_MAX_CONCURRENCY', 2, { min: 1, max: 32 }, env),
     maxQueue: integer('BROKER_MAX_QUEUE', 20, { min: 0, max: 1000 }, env),
     perRepoHourlyLimit: integer('BROKER_PER_REPO_HOURLY_LIMIT', 20, { min: 1, max: 1000 }, env),
+    serviceHourlyLimit: integer('BROKER_SERVICE_HOURLY_LIMIT', 100, { min: 1, max: 10000 }, env),
     databasePoolSize: integer('BROKER_DATABASE_POOL_SIZE', 10, { min: 2, max: 100 }, env),
   });
 }

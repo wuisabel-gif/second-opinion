@@ -90,6 +90,9 @@ fn request_oidc_token(audience: &str) -> Result<String> {
 
 fn oidc_request_url(request_url: &str, audience: &str) -> Result<Url> {
     let mut url = Url::parse(request_url).context("invalid GitHub OIDC request URL")?;
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("GitHub OIDC request URL must not contain credentials");
+    }
     if url.scheme() != "https" && !is_local_http(&url) {
         bail!("GitHub OIDC request URL must use HTTPS");
     }
@@ -206,5 +209,6 @@ mod tests {
     fn rejects_insecure_remote_oidc_url() {
         assert!(oidc_request_url("http://example.com/token", "audience").is_err());
         assert!(oidc_request_url("http://127.0.0.1/token", "audience").is_ok());
+        assert!(oidc_request_url("https://user@example.com/token", "audience").is_err());
     }
 }

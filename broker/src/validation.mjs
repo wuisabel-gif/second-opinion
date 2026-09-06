@@ -17,7 +17,9 @@ function boundedString(value, name, max, { allowEmpty = true } = {}) {
 }
 
 export function validateRepository(value) {
-  if (typeof value !== 'string' || !REPOSITORY_RE.test(value) || value.length > 200) {
+  const parts = typeof value === 'string' ? value.split('/') : [];
+  if (typeof value !== 'string' || !REPOSITORY_RE.test(value) || value.length > 200
+    || parts.some((part) => part === '.' || part === '..')) {
     throw new InputError('repository must be an exact owner/name value');
   }
   return value;

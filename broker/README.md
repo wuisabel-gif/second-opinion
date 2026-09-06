@@ -34,6 +34,8 @@ automation guidance before operating it.
 - Codex runs in a fresh temporary home/workspace with host environment secrets removed, approval
   disabled, read-only sandboxing, user config/rules ignored, and tool/plugin/web surfaces disabled.
 - Request, output, queue, concurrency, timeout, and model allowlists are bounded.
+- Service-authenticated traffic has both per-repository and global hourly limits, so varying
+  repository names cannot bypass the service-wide spending ceiling.
 - The service returns sanitized errors and never logs JWTs, prompts, diffs, model output, or auth.
 
 The broker still sees repository diffs and sends them to OpenAI. Run it only on infrastructure you
@@ -64,7 +66,7 @@ This creates `~/.codex/auth.json`. Never commit, upload, print, or paste that fi
 ```bash
 cp broker/.env.example broker/.env
 openssl rand -base64 32       # use as BROKER_MASTER_KEY
-openssl rand -base64 36       # use as POSTGRES_PASSWORD
+openssl rand -hex 32          # use as POSTGRES_PASSWORD (URL-safe)
 ```
 
 Set `BROKER_OIDC_AUDIENCE` to a stable identifier owned by this deployment, normally its HTTPS URL.
@@ -89,6 +91,11 @@ docker compose --env-file broker/.env -f broker/compose.yaml run --rm -T broker 
 
 The command returns a `credential_id`. The plaintext buffer is cleared after encryption; only the
 AES-GCM record is stored in PostgreSQL.
+
+For a hosted GitHub App deployment, set that UUID as `BROKER_DEFAULT_CREDENTIAL_ID` alongside the
+independent `BROKER_SERVICE_TOKEN`, then restart the broker. Requests authenticated by that service
+token auto-enroll previously unseen repositories against the default credential. OIDC/Actions
+requests never auto-enroll and still require the exact registration below.
 
 ## 4. Register a repository identity
 
@@ -143,9 +150,12 @@ No `REVIEW_API_KEY`, `OPENAI_API_KEY`, or `CODEX_AUTH_JSON` repository secret is
 Use a versioned keyring to rotate encryption without downtime:
 
 ```bash
-export BROKER_MASTER_KEYS='{"1":"OLD_BASE64_KEY","2":"NEW_BASE64_KEY"}'
-export BROKER_ACTIVE_KEY_VERSION=2
-npm run admin -- rotate-keys
+# Put these in broker/.env, replacing BROKER_MASTER_KEY:
+BROKER_MASTER_KEYS='{"1":"OLD_BASE64_KEY","2":"NEW_BASE64_KEY"}'
+BROKER_ACTIVE_KEY_VERSION=2
+
+docker compose --env-file broker/.env -f broker/compose.yaml run --rm broker \
+  npm run admin -- rotate-keys
 ```
 
 Keep old keys available until every record has been rotated and verified. Back up PostgreSQL and
@@ -160,11 +170,18 @@ under the credential lock before returning the result. If the account is revoked
 - `GET /healthz` checks the process.
 - `GET /readyz` checks PostgreSQL connectivity.
 - `POST /v1/reviews` is the OIDC-authenticated protocol endpoint.
+- `POST /v1/internal/reviews` accepts only the optional, separately generated
+  `BROKER_SERVICE_TOKEN`; it is for the hosted GitHub App worker and still requires repository
+  enrollment (explicit or via `BROKER_DEFAULT_CREDENTIAL_ID`) and rate limiting. Never expose that
+  token to a repository or browser.
 - Set reverse-proxy body and request timeouts at least as high as broker limits.
 - Alert on `upstream_failed`, `queue_full`, database readiness, and repeated authorization failures.
 - Keep core dumps and request-body logging disabled.
 - Upgrade the pinned Codex version deliberately; verify every strict `--disable` feature against
   `codex features list` and run the integration tests first.
+- Give the broker at least a 30-second container termination grace period. Shutdown stops intake,
+  terminates active Codex process groups, persists any rotated auth, and drains credential locks
+  before closing PostgreSQL.
 
 ## Local development
 

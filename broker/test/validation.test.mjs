@@ -24,7 +24,7 @@ function payload(overrides = {}) {
 test('validates repository names strictly', () => {
   assert.equal(validateRepository('owner/repo'), 'owner/repo');
   assert.equal(validateRepository('a.b-c_d/e.f-g_h'), 'a.b-c_d/e.f-g_h');
-  for (const bad of ['', 'owner', 'owner/', '/repo', 'a/b/c', 'a b/repo', 'owner/repo?x']) {
+  for (const bad of ['', 'owner', 'owner/', '/repo', 'a/b/c', 'a b/repo', 'owner/repo?x', '../repo', 'owner/..']) {
     assert.throws(() => validateRepository(bad), InputError);
   }
 });
