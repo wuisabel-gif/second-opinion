@@ -84,6 +84,21 @@ export function loadConfig(env = process.env) {
       'HOSTED_MONTHLY_REVIEW_LIMIT',
     ),
     workerConcurrency: parsePositiveInteger(env.HOSTED_WORKERS, 2, 'HOSTED_WORKERS'),
+    maxPendingReviews: parsePositiveInteger(
+      env.HOSTED_MAX_PENDING_REVIEWS,
+      100,
+      'HOSTED_MAX_PENDING_REVIEWS',
+    ),
+    reviewTimeoutMs: parsePositiveInteger(
+      env.HOSTED_REVIEW_TIMEOUT_MS,
+      15 * 60 * 1000,
+      'HOSTED_REVIEW_TIMEOUT_MS',
+    ),
+    reviewerKillGraceMs: parsePositiveInteger(
+      env.HOSTED_REVIEWER_KILL_GRACE_MS,
+      10 * 1000,
+      'HOSTED_REVIEWER_KILL_GRACE_MS',
+    ),
     rateLimitPerMinute: parsePositiveInteger(
       env.HOSTED_RATE_LIMIT_PER_MINUTE,
       10,
@@ -211,7 +226,7 @@ async function deleteUserSessions(store, userId) {
   });
 }
 
-export async function reserveReview(store, job, limit, now = Date.now()) {
+export async function reserveReview(store, job, monthlyLimit, pendingLimit, now = Date.now()) {
   return store.update((state) => {
     const installation = state.installations[String(job.installationId)];
     if (!installation?.enabled) return { accepted: false, reason: 'installation_disabled' };
@@ -223,13 +238,28 @@ export async function reserveReview(store, job, limit, now = Date.now()) {
       return { accepted: false, reason: 'duplicate' };
     }
 
+    const pending = Object.values(state.jobs)
+      .filter((record) => ['queued', 'running'].includes(record.status)).length;
+    if (pending >= pendingLimit) return { accepted: false, reason: 'service_busy' };
+
     const usageKey = `${job.installationId}:${monthKey(now)}`;
     const used = state.usage[usageKey] || 0;
-    if (used >= limit) return { accepted: false, reason: 'quota_exceeded' };
+    if (used >= monthlyLimit) return { accepted: false, reason: 'quota_exceeded' };
 
     state.usage[usageKey] = used + 1;
     state.jobs[jobKey] = { status: 'queued', job, createdAt: now, updatedAt: now };
     return { accepted: true, jobKey, installation: { ...installation } };
+  });
+}
+
+async function discardReviewReservation(store, jobKey) {
+  return store.update((state) => {
+    const record = state.jobs[jobKey];
+    if (!record || record.status !== 'queued') return;
+    const usageKey = `${record.job.installationId}:${monthKey(record.createdAt)}`;
+    state.usage[usageKey] -= 1;
+    if (state.usage[usageKey] === 0) delete state.usage[usageKey];
+    delete state.jobs[jobKey];
   });
 }
 
@@ -323,28 +353,48 @@ function reviewerEnvironment(config, installation, token, job) {
   };
 }
 
-async function spawnReviewer(config, installation, token, job, signal) {
+export async function spawnReviewer(config, installation, token, job, signal) {
   await new Promise((resolve, reject) => {
     const child = spawn(config.reviewerBinary, [], {
       env: reviewerEnvironment(config, installation, token, job),
       stdio: ['ignore', 'ignore', 'ignore'],
     });
-    const abort = () => child.kill('SIGTERM');
+    let settled = false;
+    let terminationError;
+    let killTimer;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(killTimer);
+      signal.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const terminate = (error) => {
+      terminationError ||= error;
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      child.kill('SIGTERM');
+      killTimer ||= setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }, config.reviewerKillGraceMs);
+    };
+    const abort = () => terminate(new Error('review cancelled'));
+    const timeoutTimer = setTimeout(() => {
+      terminate(new Error(`reviewer timed out after ${config.reviewTimeoutMs}ms`));
+    }, config.reviewTimeoutMs);
     signal.addEventListener('abort', abort, { once: true });
-    child.once('error', (error) => {
-      signal.removeEventListener('abort', abort);
-      reject(error);
-    });
+    child.once('error', finish);
     child.once('exit', (code, signalName) => {
-      signal.removeEventListener('abort', abort);
-      if (code === 0) resolve();
-      else reject(new Error(`reviewer exited with ${code ?? signalName}`));
+      if (terminationError) finish(terminationError);
+      else if (code === 0) finish();
+      else finish(new Error(`reviewer exited with ${code ?? signalName}`));
     });
     if (signal.aborted) abort();
   });
 }
 
-function createQueue(concurrency, worker) {
+function createQueue(concurrency, capacity, worker) {
   const jobs = [];
   let active = 0;
   const pump = () => {
@@ -358,58 +408,73 @@ function createQueue(concurrency, worker) {
         });
     }
   };
-  return (job) => {
-    jobs.push(job);
-    pump();
+  return {
+    enqueue(job) {
+      if (active + jobs.length >= capacity) return false;
+      jobs.push(job);
+      pump();
+      return true;
+    },
+    remove(predicate) {
+      for (let index = jobs.length - 1; index >= 0; index -= 1) {
+        if (predicate(jobs[index])) jobs.splice(index, 1);
+      }
+    },
   };
 }
 
 function createReviewQueue(config, store) {
   const active = new Map();
-  const enqueue = createQueue(config.workerConcurrency, async ({ job, jobKey }) => {
-    const installationId = String(job.installationId);
-    const controller = new AbortController();
-    const controllers = active.get(installationId) || new Set();
-    controllers.add(controller);
-    active.set(installationId, controllers);
-    try {
-      const installation = await store.read((state) => state.installations[installationId]);
-      if (!installation?.enabled || installation.suspended || controller.signal.aborted) {
-        await setJobStatus(store, jobKey, 'cancelled');
-        return;
+  const queue = createQueue(
+    config.workerConcurrency,
+    config.maxPendingReviews,
+    async ({ job, jobKey }) => {
+      const installationId = String(job.installationId);
+      const controller = new AbortController();
+      const controllers = active.get(installationId) || new Set();
+      controllers.add(controller);
+      active.set(installationId, controllers);
+      try {
+        const installation = await store.read((state) => state.installations[installationId]);
+        if (!installation?.enabled || installation.suspended || controller.signal.aborted) {
+          await setJobStatus(store, jobKey, 'cancelled');
+          return;
+        }
+        await setJobStatus(store, jobKey, 'running');
+        const token = await installationToken(
+          config,
+          job.installationId,
+          job.repositoryId,
+          controller.signal,
+        );
+        const pull = await githubRequest(`/repos/${job.repository}/pulls/${job.pullNumber}`, {
+          token,
+          signal: controller.signal,
+        });
+        if (pull.head?.sha !== job.headSha) {
+          await setJobStatus(store, jobKey, 'superseded');
+          return;
+        }
+        await spawnReviewer(config, installation, token, job, controller.signal);
+        await setJobStatus(store, jobKey, 'succeeded');
+        console.log(`review succeeded for ${job.repository}#${job.pullNumber}`);
+      } catch (error) {
+        await setJobStatus(store, jobKey, controller.signal.aborted ? 'cancelled' : 'failed');
+        if (!controller.signal.aborted) {
+          console.error(`review failed for ${job.repository}#${job.pullNumber}: ${error.message}`);
+        }
+      } finally {
+        controllers.delete(controller);
+        if (controllers.size === 0) active.delete(installationId);
       }
-      await setJobStatus(store, jobKey, 'running');
-      const token = await installationToken(
-        config,
-        job.installationId,
-        job.repositoryId,
-        controller.signal,
-      );
-      const pull = await githubRequest(`/repos/${job.repository}/pulls/${job.pullNumber}`, {
-        token,
-        signal: controller.signal,
-      });
-      if (pull.head?.sha !== job.headSha) {
-        await setJobStatus(store, jobKey, 'superseded');
-        return;
-      }
-      await spawnReviewer(config, installation, token, job, controller.signal);
-      await setJobStatus(store, jobKey, 'succeeded');
-      console.log(`review succeeded for ${job.repository}#${job.pullNumber}`);
-    } catch (error) {
-      await setJobStatus(store, jobKey, 'failed');
-      if (!controller.signal.aborted) {
-        console.error(`review failed for ${job.repository}#${job.pullNumber}: ${error.message}`);
-      }
-    } finally {
-      controllers.delete(controller);
-      if (controllers.size === 0) active.delete(installationId);
-    }
-  });
+    },
+  );
   return {
-    enqueue,
+    enqueue: queue.enqueue,
     cancel(installationId) {
-      for (const controller of active.get(String(installationId)) || []) controller.abort();
+      const key = String(installationId);
+      queue.remove(({ job }) => String(job.installationId) === key);
+      for (const controller of active.get(key) || []) controller.abort();
     },
   };
 }
@@ -767,9 +832,22 @@ async function handleWebhook(req, res, store, config, reviewQueue, rateLimiter) 
     return sendJson(res, 400, { error: 'pull request payload is incomplete' });
   }
   const job = { installationId, repository, repositoryId, pullNumber, headSha };
-  const reservation = await reserveReview(store, job, config.monthlyReviewLimit);
+  const reservation = await reserveReview(
+    store,
+    job,
+    config.monthlyReviewLimit,
+    config.maxPendingReviews,
+  );
+  if (reservation.reason === 'service_busy') {
+    res.setHeader('retry-after', '30');
+    return sendJson(res, 503, { accepted: false, reason: reservation.reason });
+  }
   if (reservation.accepted) {
-    reviewQueue.enqueue({ job, jobKey: reservation.jobKey });
+    if (!reviewQueue.enqueue({ job, jobKey: reservation.jobKey })) {
+      await discardReviewReservation(store, reservation.jobKey);
+      res.setHeader('retry-after', '30');
+      return sendJson(res, 503, { accepted: false, reason: 'service_busy' });
+    }
   }
   sendJson(res, 202, { accepted: reservation.accepted, reason: reservation.reason });
 }
@@ -791,17 +869,28 @@ export function createRateLimiter(limit, now = () => Date.now()) {
   };
 }
 
-export function createServer(config, store) {
+export async function recoverReviewJobs(store, now = Date.now()) {
+  return store.update((state) => Object.entries(state.jobs).flatMap(([jobKey, record]) => {
+    if (now - record.createdAt > JOB_RETENTION_MS) return [];
+    if (record.status === 'running') {
+      record.status = 'queued';
+      record.updatedAt = now;
+    }
+    return record.status === 'queued' && record.job
+      ? [{ job: record.job, jobKey }]
+      : [];
+  }));
+}
+
+export async function createServer(config, store) {
   const reviewQueue = createReviewQueue(config, store);
   const rateLimiter = createRateLimiter(config.rateLimitPerMinute);
-  store.read((state) => Object.entries(state.jobs)
-    .filter(([, job]) => job.status === 'queued' && job.job)
-    .map(([jobKey, record]) => ({
-      job: record.job,
-      jobKey,
-    })))
-    .then((jobs) => jobs.forEach(reviewQueue.enqueue))
-    .catch((error) => console.error(`could not recover queued reviews: ${error.message}`));
+  const recovered = await recoverReviewJobs(store);
+  for (const review of recovered) {
+    if (!reviewQueue.enqueue(review)) {
+      throw new Error('pending review count exceeds HOSTED_MAX_PENDING_REVIEWS');
+    }
+  }
   return http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', config.publicUrl);
     try {
@@ -883,7 +972,7 @@ async function main() {
   const config = loadConfig();
   const store = new JsonStore(config.statePath);
   await store.init();
-  const server = createServer(config, store);
+  const server = await createServer(config, store);
   server.listen(config.port, '127.0.0.1', () => {
     console.log(`second-opinion hosted service listening on 127.0.0.1:${config.port}`);
   });

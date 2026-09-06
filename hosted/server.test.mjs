@@ -9,7 +9,9 @@ import {
   createRateLimiter,
   createServer,
   JsonStore,
+  recoverReviewJobs,
   reserveReview,
+  spawnReviewer,
   verifyWebhookSignature,
 } from './server.mjs';
 
@@ -50,7 +52,7 @@ test('reservation enforces enablement, idempotency, and monthly quota', async (c
     headSha: 'abc',
   };
 
-  assert.deepEqual(await reserveReview(store, job, 1), {
+  assert.deepEqual(await reserveReview(store, job, 1, 10), {
     accepted: false,
     reason: 'installation_disabled',
   });
@@ -59,18 +61,71 @@ test('reservation enforces enablement, idempotency, and monthly quota', async (c
       id: '4', enabled: true, provider: 'openai', model: 'test', plan: 'free',
     };
   });
-  assert.equal((await reserveReview(store, job, 1)).accepted, true);
-  assert.deepEqual(await reserveReview(store, job, 1), {
+  assert.equal((await reserveReview(store, job, 1, 10)).accepted, true);
+  assert.deepEqual(await reserveReview(store, job, 1, 10), {
     accepted: false,
     reason: 'duplicate',
   });
-  assert.deepEqual(await reserveReview(store, { ...job, headSha: 'def' }, 1), {
+  assert.deepEqual(await reserveReview(store, { ...job, headSha: 'def' }, 1, 10), {
     accepted: false,
     reason: 'quota_exceeded',
   });
 });
 
-test('signed installation webhook records the installer and defaults to disabled', async (context) => {
+test('recovers interrupted reviews as queued work', async (context) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'second-opinion-hosted-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const store = new JsonStore(path.join(directory, 'state.json'));
+  await store.init();
+  const createdAt = Date.now();
+  await store.update((state) => {
+    state.jobs.running = {
+      status: 'running', job: { installationId: 1 }, createdAt, updatedAt: createdAt,
+    };
+    state.jobs.queued = {
+      status: 'queued', job: { installationId: 2 }, createdAt, updatedAt: createdAt,
+    };
+    state.jobs.succeeded = {
+      status: 'succeeded', job: { installationId: 3 }, createdAt, updatedAt: createdAt,
+    };
+  });
+
+  const recovered = await recoverReviewJobs(store, createdAt + 1);
+
+  assert.deepEqual(recovered.map(({ jobKey }) => jobKey).sort(), ['queued', 'running']);
+  assert.deepEqual(await store.read((state) => state.jobs.running), {
+    status: 'queued', job: { installationId: 1 }, createdAt, updatedAt: createdAt + 1,
+  });
+  assert.equal(await store.read((state) => state.jobs.succeeded.status), 'succeeded');
+});
+
+test('reviewer timeout escalates to SIGKILL', { timeout: 2_000 }, async (context) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'second-opinion-hosted-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const reviewer = path.join(directory, 'reviewer');
+  await fs.writeFile(reviewer, [
+    '#!/usr/bin/env node',
+    "process.on('SIGTERM', () => {});",
+    'setInterval(() => {}, 1_000);',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  const controller = new AbortController();
+
+  await assert.rejects(spawnReviewer(
+    {
+      reviewerBinary: reviewer,
+      reviewTimeoutMs: 250,
+      reviewerKillGraceMs: 50,
+      botLogin: 'test[bot]',
+    },
+    { provider: 'openai', model: 'test-model' },
+    'github-token',
+    { repository: 'owner/repo', pullNumber: 1, headSha: 'abc' },
+    controller.signal,
+  ), /reviewer timed out after 250ms/);
+});
+
+test('signed webhooks manage installation lifecycle and reject work at capacity', async (context) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'second-opinion-hosted-'));
   context.after(() => fs.rm(directory, { recursive: true, force: true }));
   const store = new JsonStore(path.join(directory, 'state.json'));
@@ -79,11 +134,12 @@ test('signed installation webhook records the installer and defaults to disabled
     publicUrl: 'http://127.0.0.1',
     webhookSecret: 'webhook-test-secret',
     workerConcurrency: 1,
+    maxPendingReviews: 1,
     rateLimitPerMinute: 2,
     monthlyReviewLimit: 3,
     models: { openai: ['test-model'] },
   };
-  const server = createServer(config, store);
+  const server = await createServer(config, store);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   context.after(() => new Promise((resolve) => server.close(resolve)));
   const body = JSON.stringify({
@@ -145,4 +201,30 @@ test('signed installation webhook records the installer and defaults to disabled
   });
   assert.equal(revokedResponse.status, 202);
   assert.equal(await store.read((state) => Object.keys(state.sessions).length), 0);
+
+  await store.update((state) => {
+    state.installations['12'].enabled = true;
+    state.installations['12'].suspended = false;
+    state.jobs.pending = {
+      status: 'queued', job: { installationId: 99 }, createdAt: Date.now(), updatedAt: Date.now(),
+    };
+  });
+  const pullRequest = JSON.stringify({
+    action: 'opened',
+    installation: { id: 12 },
+    repository: { id: 9, full_name: 'owner/repo' },
+    pull_request: { number: 3, draft: false, head: { sha: 'def' } },
+  });
+  const busyResponse = await fetch(`http://127.0.0.1:${address.port}/github/webhooks`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-github-event': 'pull_request',
+      'x-hub-signature-256': webhookSignature(config.webhookSecret, pullRequest),
+    },
+    body: pullRequest,
+  });
+  assert.equal(busyResponse.status, 503);
+  assert.equal(busyResponse.headers.get('retry-after'), '30');
+  assert.deepEqual(await busyResponse.json(), { accepted: false, reason: 'service_busy' });
 });

@@ -57,6 +57,9 @@ Optional variables:
 | `HOSTED_MONTHLY_REVIEW_LIMIT` | `25` | Hard per-installation monthly cap |
 | `HOSTED_RATE_LIMIT_PER_MINUTE` | `10` | Per-installation webhook burst cap |
 | `HOSTED_WORKERS` | `2` | Concurrent review processes |
+| `HOSTED_MAX_PENDING_REVIEWS` | `100` | Global cap across queued and running reviews |
+| `HOSTED_REVIEW_TIMEOUT_MS` | `900000` | Hard deadline for one reviewer process |
+| `HOSTED_REVIEWER_KILL_GRACE_MS` | `10000` | Delay between `SIGTERM` and `SIGKILL` |
 | `HOSTED_OPENAI_MODELS` | `gpt-5.6-sol` | Comma-separated offered models |
 | `HOSTED_ANTHROPIC_MODELS` | `claude-sonnet-4-6` | Comma-separated offered models |
 

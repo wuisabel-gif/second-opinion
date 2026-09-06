@@ -27,7 +27,8 @@ after cost alerts and customer-visible usage records exist.
    unmodified bytes before parsing JSON.
 4. The service rejects unsupported actions and drafts, applies the per-installation burst limit,
    then reserves the `(installation, repository, pull request, head SHA)` idempotency key and one
-   monthly quota unit in persistent state.
+   monthly quota unit in persistent state. A global pending-work cap returns `503` backpressure
+   before accepting more work.
 5. A worker creates a one-hour installation token restricted to the event repository and to
    `contents: read` plus `pull_requests: write`. It verifies the current head SHA before starting.
 6. The existing Rust binary fetches the diff, repository context, and trusted base `REVIEW.md`;
@@ -68,7 +69,9 @@ protection, and an equivalent quota reservation before work starts.
 The reference service atomically replaces a mode-`0600` JSON state file and serializes mutations
 inside one process. It stores installation settings, monthly counters, encrypted user sessions,
 and job status. Jobs expire after 30 days, usage buckets after the month changes, and sessions
-after eight hours.
+after eight hours. At startup, interrupted running jobs are transactionally returned to the queue.
+Reviewer children have a hard deadline and are terminated with `SIGTERM`, followed by `SIGKILL`
+after a configurable grace period.
 
 This is intentionally a single-instance alpha design. Before public signup:
 
