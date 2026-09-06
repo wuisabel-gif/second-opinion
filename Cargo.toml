@@ -1,6 +1,6 @@
 [package]
 name = "second-opinion"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "Agent-agnostic AI pull request reviews as a GitHub Action"
 license = "MIT"
@@ -12,7 +12,9 @@ anyhow = "1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 ureq = { version = "=2.9.7", features = ["json"] }
+url = "2"
 
 [profile.release]
 opt-level = 1

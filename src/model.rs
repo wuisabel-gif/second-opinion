@@ -13,24 +13,31 @@ pub enum Provider {
     Anthropic,
     OpenAiResponses,
     OpenAiChat,
+    CodexCli,
+    CodexBroker,
     Webhook,
 }
 
 impl Provider {
     pub fn from_env() -> Result<Self> {
-        match env::var("REVIEW_PROVIDER")
+        let value = env::var("REVIEW_PROVIDER")
             .unwrap_or_else(|_| "anthropic".to_string())
             .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+            .to_ascii_lowercase();
+        Self::parse(&value)
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "openai" | "openai-responses" | "responses" => Ok(Self::OpenAiResponses),
             "openai-chat" | "openai-compatible" | "chat-completions" => Ok(Self::OpenAiChat),
+            "codex" | "codex-cli" | "chatgpt-subscription" => Ok(Self::CodexCli),
+            "codex-broker" | "codex-subscription" => Ok(Self::CodexBroker),
             "webhook" | "custom" => Ok(Self::Webhook),
-            value => bail!(
-                "unsupported REVIEW_PROVIDER '{value}'; expected anthropic, openai-responses, \
-openai-compatible, or webhook"
+            unsupported => bail!(
+                "unsupported REVIEW_PROVIDER '{unsupported}'; expected anthropic, openai-responses, \
+                 openai-compatible, codex, codex-broker, or webhook"
             ),
         }
     }
@@ -40,6 +47,8 @@ openai-compatible, or webhook"
             Self::Anthropic => "anthropic",
             Self::OpenAiResponses => "openai-responses",
             Self::OpenAiChat => "openai-compatible",
+            Self::CodexCli => "codex",
+            Self::CodexBroker => "codex-broker",
             Self::Webhook => "webhook",
         }
     }
@@ -52,6 +61,7 @@ openai-compatible, or webhook"
             Self::Anthropic => Ok(DEFAULT_ANTHROPIC_MODEL.to_string()),
             Self::OpenAiResponses => Ok(DEFAULT_OPENAI_MODEL.to_string()),
             Self::OpenAiChat => bail!("REVIEW_MODEL is required for openai-compatible providers"),
+            Self::CodexCli | Self::CodexBroker => Ok(DEFAULT_OPENAI_MODEL.to_string()),
             Self::Webhook => Ok(String::new()),
         }
     }
@@ -70,6 +80,7 @@ openai-compatible, or webhook"
                     .context("OPENAI_API_KEY or REVIEW_API_KEY not set")?,
             )),
             Self::OpenAiChat => Ok(generic.or_else(|| non_empty_env("OPENAI_API_KEY"))),
+            Self::CodexCli | Self::CodexBroker => Ok(None),
             Self::Webhook => Ok(generic),
         }
     }
@@ -210,6 +221,12 @@ fn run_review(
             run_openai(api_key.context("OpenAI API key missing")?, model, request)
         }
         Provider::OpenAiChat => run_openai_chat(api_key, model, request),
+        Provider::CodexCli => {
+            crate::codex::run_review(model, request, review_system_prompt(), review_json_schema())
+        }
+        Provider::CodexBroker => {
+            crate::broker::run_review(model, request, review_system_prompt(), review_json_schema())
+        }
         Provider::Webhook => run_webhook(api_key, model, request),
     }
 }
@@ -487,5 +504,18 @@ mod tests {
         assert!(parse_openai_response(&openai).unwrap().findings.is_empty());
         let wrapped = json!({"data":{"output":{"summary":"ok","findings":[]}}});
         assert_eq!(parse_review_value(&wrapped).unwrap().summary, "ok");
+    }
+
+    #[test]
+    fn parses_codex_provider_aliases() {
+        assert_eq!(Provider::parse("codex").unwrap(), Provider::CodexCli);
+        assert_eq!(
+            Provider::parse("chatgpt-subscription").unwrap(),
+            Provider::CodexCli
+        );
+        assert_eq!(
+            Provider::parse("codex-subscription").unwrap(),
+            Provider::CodexBroker
+        );
     }
 }

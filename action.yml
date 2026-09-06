@@ -8,7 +8,7 @@ inputs:
     required: false
     default: ""
   provider:
-    description: anthropic, openai-responses, openai-compatible, or webhook
+    description: anthropic, openai-responses, openai-compatible, codex, codex-broker, or webhook
     required: false
     default: anthropic
   model:
@@ -23,6 +23,22 @@ inputs:
     description: Exact endpoint URL for the generic webhook adapter
     required: false
     default: ""
+  broker-url:
+    description: HTTPS base URL for the Codex subscription credential broker
+    required: false
+    default: ""
+  broker-audience:
+    description: Audience requested for the GitHub Actions OIDC token sent to the broker
+    required: false
+    default: ""
+  codex-auth-json:
+    description: Base64-encoded ChatGPT-authenticated Codex auth.json for the direct codex provider
+    required: false
+    default: ""
+  codex-version:
+    description: Exact @openai/codex version installed for the direct codex provider
+    required: false
+    default: "0.147.0"
   auth-header:
     description: Authentication header for compatible APIs and webhooks
     required: false
@@ -58,6 +74,18 @@ runs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
+    - name: Install isolated Codex CLI
+      if: ${{ inputs.provider == 'codex' || inputs.provider == 'codex-cli' || inputs.provider == 'chatgpt-subscription' }}
+      shell: bash
+      env:
+        CODEX_VERSION: ${{ inputs.codex-version }}
+      run: |
+        set -euo pipefail
+        install_root="$RUNNER_TEMP/second-opinion-codex"
+        mkdir -p "$install_root"
+        npm install --prefix "$install_root" --no-audit --no-fund --ignore-scripts "@openai/codex@$CODEX_VERSION"
+        echo "$install_root/node_modules/.bin" >> "$GITHUB_PATH"
+
     - name: Run second-opinion
       shell: bash
       env:
@@ -69,6 +97,9 @@ runs:
         REVIEW_MODEL: ${{ inputs.model }}
         REVIEW_BASE_URL: ${{ inputs.base-url }}
         REVIEW_ENDPOINT: ${{ inputs.endpoint }}
+        REVIEW_BROKER_URL: ${{ inputs.broker-url }}
+        REVIEW_BROKER_AUDIENCE: ${{ inputs.broker-audience }}
+        CODEX_AUTH_JSON: ${{ inputs.codex-auth-json }}
         REVIEW_AUTH_HEADER: ${{ inputs.auth-header }}
         REVIEW_AUTH_SCHEME: ${{ inputs.auth-scheme }}
         REVIEW_RESPONSE_JSON_POINTER: ${{ inputs.response-json-pointer }}

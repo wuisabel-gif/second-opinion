@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
   pull-requests: write
 
 jobs:
@@ -13,31 +14,38 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REVIEW_API_KEY: ${{ secrets.REVIEW_API_KEY }}
+      CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
       REVIEW_ENDPOINT: ${{ vars.REVIEW_ENDPOINT || '' }}
+      REVIEW_BROKER_URL: ${{ vars.REVIEW_BROKER_URL || '' }}
     steps:
       - name: Explain disabled self-review
-        if: env.REVIEW_API_KEY == '' && env.REVIEW_ENDPOINT == ''
+        if: env.REVIEW_API_KEY == '' && env.CODEX_AUTH_JSON == '' && env.REVIEW_ENDPOINT == '' && env.REVIEW_BROKER_URL == ''
         run: |
           echo "Self-review is disabled until either:"
           echo "- the REVIEW_API_KEY repository secret is set for built-in providers, or"
-          echo "- REVIEW_ENDPOINT is set for webhook mode."
+          echo "- CODEX_AUTH_JSON is set for direct Codex mode, or"
+          echo "- REVIEW_ENDPOINT is set for webhook mode, or"
+          echo "- REVIEW_BROKER_URL is set for Codex subscription mode."
 
       - name: Check out the trusted base revision
-        if: env.REVIEW_API_KEY != '' || env.REVIEW_ENDPOINT != ''
+        if: env.REVIEW_API_KEY != '' || env.CODEX_AUTH_JSON != '' || env.REVIEW_ENDPOINT != '' || env.REVIEW_BROKER_URL != ''
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
       - name: Review pull request
-        if: env.REVIEW_API_KEY != '' || env.REVIEW_ENDPOINT != ''
+        if: env.REVIEW_API_KEY != '' || env.CODEX_AUTH_JSON != '' || env.REVIEW_ENDPOINT != '' || env.REVIEW_BROKER_URL != ''
         uses: ./
         with:
           api-key: ${{ env.REVIEW_API_KEY }}
-          provider: ${{ vars.REVIEW_ENDPOINT != '' && 'webhook' || vars.REVIEW_PROVIDER || 'anthropic' }}
+          provider: ${{ vars.REVIEW_BROKER_URL != '' && 'codex-broker' || vars.REVIEW_ENDPOINT != '' && 'webhook' || vars.REVIEW_PROVIDER || 'anthropic' }}
           model: ${{ vars.REVIEW_MODEL }}
           base-url: ${{ vars.REVIEW_BASE_URL }}
           endpoint: ${{ vars.REVIEW_ENDPOINT }}
+          broker-url: ${{ vars.REVIEW_BROKER_URL }}
+          broker-audience: ${{ vars.REVIEW_BROKER_AUDIENCE }}
+          codex-auth-json: ${{ env.CODEX_AUTH_JSON }}
           auth-header: ${{ vars.REVIEW_AUTH_HEADER || 'Authorization' }}
           auth-scheme: ${{ vars.REVIEW_AUTH_SCHEME || 'Bearer' }}
           response-json-pointer: ${{ vars.REVIEW_RESPONSE_JSON_POINTER }}

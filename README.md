@@ -2,20 +2,20 @@
 
 > **Change the agent, not the reviewer.**
 
-An agent-agnostic AI code reviewer, written in Rust and packaged as a reusable GitHub Action. It supports native Anthropic and OpenAI APIs, OpenAI-compatible services, and an HTTP webhook contract for any other hosted or local AI agent.
+An agent-agnostic AI code reviewer, written in Rust and packaged as a reusable GitHub Action. It supports native Anthropic and OpenAI APIs, OpenAI-compatible services, direct or brokered Codex subscription login, and an HTTP webhook contract for any other hosted or local AI agent.
 
 ## Install
 
 1. Copy [`examples/review.yml`](examples/review.yml) to `.github/workflows/review.yml` in the repository you want to review.
-2. Add the selected provider key as a repository Actions secret named `REVIEW_API_KEY`.
-3. Set `REVIEW_PROVIDER` and any adapter-specific values as repository Actions variables.
+2. Add the selected credential: `REVIEW_API_KEY` for API providers, `CODEX_AUTH_JSON` for direct Codex mode, or enroll the repository with a Codex broker so no model credential is stored in GitHub.
+3. Set `REVIEW_PROVIDER` and any adapter-specific values as repository Actions variables. Setting `REVIEW_BROKER_URL` automatically selects broker mode in the example workflow.
 4. Open or update a pull request.
 
 The reusable action can also be added directly:
 
 ```yaml
 - name: Review pull request
-  uses: wuisabel-gif/second-opinion@v0.3.1
+  uses: wuisabel-gif/second-opinion@v0.4.0
   with:
     api-key: ${{ secrets.REVIEW_API_KEY }}
     provider: ${{ vars.REVIEW_PROVIDER || 'anthropic' }}
@@ -61,13 +61,15 @@ Add `REVIEW.md` to the repository's default branch to define project-specific re
 
 ## Provider setup
 
-Choose an adapter and add its API key as a repository secret named `REVIEW_API_KEY` under Settings, Secrets and variables, Actions. A local unauthenticated service or webhook does not need this secret. `REVIEW_PROVIDER` defaults to `anthropic`; other adapters require it explicitly. The `GITHUB_TOKEN` is supplied automatically and the example workflow grants only `contents: read` and `pull-requests: write`.
+Choose an adapter and add its credential under Settings, Secrets and variables, Actions. API providers use `REVIEW_API_KEY`; direct Codex mode uses `CODEX_AUTH_JSON`; a local unauthenticated service, webhook, or Codex broker may need neither. `REVIEW_PROVIDER` defaults to `anthropic`; other adapters require it explicitly. The `GITHUB_TOKEN` is supplied automatically. The example workflow grants `contents: read`, `pull-requests: write`, and `id-token: write`; the last permission only lets broker mode request a short-lived GitHub OIDC identity token.
 
 | Adapter | `REVIEW_PROVIDER` | Required configuration | Typical services |
 |---|---|---|---|
 | Anthropic Messages | `anthropic` | `REVIEW_API_KEY`; optional `REVIEW_MODEL` | Claude |
 | OpenAI Responses | `openai` or `openai-responses` | `REVIEW_API_KEY`; optional `REVIEW_MODEL` | OpenAI GPT models |
 | OpenAI-compatible Chat Completions | `openai-compatible` | `REVIEW_BASE_URL`, `REVIEW_MODEL`; API key when required | OpenRouter, Groq, Mistral, xAI, DeepSeek, Ollama, LM Studio, and compatible gateways |
+| Direct Codex subscription | `codex` | `CODEX_AUTH_JSON`; optional `REVIEW_MODEL` | Official Codex CLI on the Actions runner |
+| Codex subscription broker | `codex-broker` | `REVIEW_BROKER_URL`, `REVIEW_BROKER_AUDIENCE`; optional `REVIEW_MODEL` | Official Codex CLI using broker-held ChatGPT auth |
 | Generic webhook | `webhook` | `REVIEW_ENDPOINT`; optional `REVIEW_API_KEY` and `REVIEW_MODEL` | Any agent exposed through an HTTP adapter |
 
 To run it by hand against any PR:
@@ -133,13 +135,18 @@ Responses wrapped in `review`, `output`, `result`, or `data` are also accepted, 
 
 ## Configuration
 
-- `REVIEW_PROVIDER`: `anthropic`, `openai-responses`, `openai-compatible`, or `webhook`. Aliases include `claude`, `openai`, `openai-chat`, `chat-completions`, and `custom`.
+- `REVIEW_PROVIDER`: `anthropic`, `openai-responses`, `openai-compatible`, `codex`, `codex-broker`, or `webhook`. Aliases include `claude`, `openai`, `openai-chat`, `chat-completions`, `codex-cli`, `chatgpt-subscription`, `codex-subscription` (broker), and `custom`.
 - `REVIEW_MODEL`: provider-specific model. It defaults to `claude-sonnet-4-6` for Anthropic and `gpt-5.6-sol` for OpenAI Responses; it is required for OpenAI-compatible services and optional for webhooks.
 - `REVIEW_API_KEY`: provider credential used by the supplied GitHub Actions workflow.
 - `ANTHROPIC_API_KEY`: backward-compatible alternative to `REVIEW_API_KEY` for local Anthropic runs.
 - `OPENAI_API_KEY`: backward-compatible alternative to `REVIEW_API_KEY` for local OpenAI and OpenAI-compatible runs.
 - `REVIEW_BASE_URL`: base URL for OpenAI-compatible APIs. It falls back to `OPENAI_BASE_URL`, then `https://api.openai.com/v1`.
 - `REVIEW_ENDPOINT`: exact URL for the generic webhook adapter.
+- `CODEX_AUTH_JSON`: base64-encoded ChatGPT-mode Codex `auth.json`, required only for direct `codex` mode.
+- `CODEX_BIN`: Codex executable override; defaults to `codex`.
+- `REVIEW_CODEX_TIMEOUT_SECONDS`: direct Codex timeout, from 10 to 3600 seconds; defaults to 900.
+- `REVIEW_BROKER_URL`: HTTPS base URL for the Codex subscription broker. Plain HTTP is accepted only for localhost development.
+- `REVIEW_BROKER_AUDIENCE`: deployment-specific audience placed in the GitHub Actions OIDC token. It is required in broker mode and must exactly match the broker configuration.
 - `REVIEW_AUTH_HEADER`: credential header for OpenAI-compatible and webhook requests; defaults to `Authorization`.
 - `REVIEW_AUTH_SCHEME`: credential prefix; defaults to `Bearer`. Set it to `none` for raw-key headers such as `api-key`.
 - `REVIEW_RESPONSE_JSON_POINTER`: optional RFC 6901 JSON Pointer for extracting a normalized review from a custom webhook response.
@@ -149,31 +156,81 @@ Responses wrapped in `review`, `output`, `result`, or `data` are also accepted, 
 - `REVIEW_BOT_LOGIN`: only this author's hidden fingerprints are trusted for deduplication; defaults to `github-actions[bot]`.
 - Diff and line-comment limits are bounded internally to control request and GitHub API sizes.
 
-## About "subscription only" usage
+## Direct Codex subscription mode
 
-If by "subscription" you mean a ChatGPT/Claude web subscription account, `second-opinion`
-cannot use that directly in built-in providers right now.
+Direct mode satisfies issue #6 with the official Codex CLI and no OpenAI API key. Log in once on
+a trusted machine, then save the base64-encoded login as a GitHub Actions secret:
 
-Built-in provider adapters in this repo are API-key based (`REVIEW_API_KEY`, `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, or per-adapter compatible vars).
+```bash
+npm install --global @openai/codex@0.147.0
+codex login
+codex login status
 
-If you want to avoid per-user credentials, your options are:
-
-1. Keep one shared API key/credential in this repo's secrets (easy to adopt today).
-2. Use `REVIEW_PROVIDER=webhook` and run your own backend that handles your preferred
-   billing/subscription model, then return the normalized review JSON.
-
-Contributors still do nothing special in both cases.
-
-### Minimal setup for now
-
-```yaml
-with:
-  api-key: ${{ secrets.REVIEW_API_KEY }}
-  provider: openai
+# macOS
+base64 -i "$HOME/.codex/auth.json" | pbcopy
+# GNU/Linux
+base64 -w 0 "$HOME/.codex/auth.json"
 ```
 
-### Future-friendly (single endpoint) setup
+Create the repository secret `CODEX_AUTH_JSON`, then configure the Action:
+
+```yaml
+concurrency:
+  group: second-opinion-codex
+  cancel-in-progress: false
+
+steps:
+  - uses: wuisabel-gif/second-opinion@v0.4.0
+    with:
+      provider: codex
+      codex-auth-json: ${{ secrets.CODEX_AUTH_JSON }}
+      model: gpt-5.6-sol
+```
+
+The Action installs a pinned official CLI, validates that the decoded file is ChatGPT-mode auth,
+and writes it to a fresh private `CODEX_HOME` outside the repository. Codex runs ephemeral with a
+read-only sandbox, no approvals, user config/rules ignored, host secrets removed, and tool/plugin,
+browser, shell, image, memory, and multi-agent features disabled. Only the schema-constrained final
+JSON message is read.
+
+**Rotation limitation:** Codex refresh tokens can rotate. A GitHub secret cannot be updated by the
+normal job token, so direct mode can eventually require another `codex login` and secret update.
+Serialize runs with `concurrency` to avoid two jobs using the same refresh chain. Reviews consume
+the ChatGPT plan's Codex allowance. For persistent token rotation and multiple repositories, use
+the broker instead.
+
+## Codex subscription broker
+
+`REVIEW_PROVIDER=codex-broker` uses ChatGPT-managed Codex access without placing
+`auth.json` on a GitHub runner. The action requests a short-lived GitHub Actions OIDC token,
+sends the normalized review payload to the broker, and receives only `{ summary, findings }`.
+The broker verifies the repository and workflow identity, keeps the rotating Codex credential
+encrypted at rest, serializes use of each credential, and runs Codex with model-generated tools
+disabled in an isolated worker.
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+steps:
+  - uses: wuisabel-gif/second-opinion@v0.4.0
+    with:
+      provider: codex-broker
+      broker-url: ${{ vars.REVIEW_BROKER_URL }}
+      broker-audience: ${{ vars.REVIEW_BROKER_AUDIENCE }}
+```
+
+See [`broker/README.md`](broker/README.md) for Docker/VPS deployment, credential enrollment,
+repository registration, HTTPS, rotation, and the threat model.
+
+OpenAI recommends API keys for ordinary automation and documents account-backed `auth.json`
+CI as an advanced pattern for trusted private infrastructure. The broker architecture keeps that
+credential off public GitHub runners, but operators must still review OpenAI's current terms and
+guidance before enabling subscription-backed automation.
+
+Generic webhook mode remains available when another service should perform the model call:
 
 ```yaml
 with:
@@ -181,9 +238,6 @@ with:
   endpoint: ${{ vars.REVIEW_ENDPOINT }}
   api-key: ${{ secrets.REVIEW_API_KEY }}
 ```
-
-In webhook mode, the action still collects PR diff/context/rules; your endpoint performs the
-model call.
 
 ## Pullfrog starter
 

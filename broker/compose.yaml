@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: broker
+      POSTGRES_USER: broker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in broker/.env}
+    volumes:
+      - broker-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U broker -d broker"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  broker:
+    build:
+      context: ..
+      dockerfile: broker/Dockerfile
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.147.0}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://broker:${POSTGRES_PASSWORD}@db:5432/broker
+      BROKER_OIDC_AUDIENCE: ${BROKER_OIDC_AUDIENCE:?set BROKER_OIDC_AUDIENCE in broker/.env}
+      BROKER_MASTER_KEY: ${BROKER_MASTER_KEY:?set BROKER_MASTER_KEY in broker/.env}
+      BROKER_ALLOWED_MODELS: ${BROKER_ALLOWED_MODELS:-gpt-5.6-sol}
+      BROKER_DEFAULT_MODEL: ${BROKER_DEFAULT_MODEL:-gpt-5.6-sol}
+      BROKER_MAX_CONCURRENCY: ${BROKER_MAX_CONCURRENCY:-2}
+      BROKER_MAX_QUEUE: ${BROKER_MAX_QUEUE:-20}
+      BROKER_PER_REPO_HOURLY_LIMIT: ${BROKER_PER_REPO_HOURLY_LIMIT:-20}
+    ports:
+      - "127.0.0.1:${BROKER_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  broker-postgres:
