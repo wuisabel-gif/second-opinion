@@ -1,0 +1,24 @@
+{
+  "name": "second-opinion-hosted",
+  "url": "https://second-opinion.example",
+  "description": "Hosted, line-level pull request reviews from second-opinion",
+  "hook_attributes": {
+    "url": "https://second-opinion.example/github/webhooks",
+    "active": true
+  },
+  "callback_urls": [
+    "https://second-opinion.example/oauth/callback"
+  ],
+  "setup_url": "https://second-opinion.example/setup",
+  "request_oauth_on_install": false,
+  "setup_on_update": true,
+  "public": true,
+  "default_permissions": {
+    "contents": "read",
+    "metadata": "read",
+    "pull_requests": "write"
+  },
+  "default_events": [
+    "pull_request"
+  ]
+}

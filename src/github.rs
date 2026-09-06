@@ -53,6 +53,28 @@ pub fn pr_number() -> Result<u64> {
         .context("could not find a PR number in the event payload")
 }
 
+pub fn head_is_expected(token: &str, repo: &str, pr: u64) -> Result<bool> {
+    let expected = expected_head_sha();
+    if expected.is_none() {
+        return Ok(true);
+    }
+    Ok(expected_head_matches(
+        expected.as_deref(),
+        &fetch_pull_refs(token, repo, pr)?.head_commit,
+    ))
+}
+
+pub fn expected_head_sha() -> Option<String> {
+    env::var("EXPECTED_HEAD_SHA")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn expected_head_matches(expected: Option<&str>, actual: &str) -> bool {
+    expected.map(|value| value == actual).unwrap_or(true)
+}
+
 pub fn load_review_input(token: &str, repo: &str, pr: u64) -> Result<ReviewInput> {
     let diff = truncate_utf8(&fetch_diff(token, repo, pr)?, MAX_DIFF_BYTES);
     let commentable = commentable_lines(&diff);
@@ -444,6 +466,7 @@ pub fn post_review(
     pr: u64,
     review: ReviewOutput,
     commentable: &BTreeMap<String, BTreeSet<u64>>,
+    commit_id: Option<&str>,
 ) -> Result<()> {
     let mut comments = Vec::new();
     let mut orphaned = Vec::new();
@@ -482,7 +505,10 @@ pub fn post_review(
     }
 
     let url = format!("https://api.github.com/repos/{repo}/pulls/{pr}/reviews");
-    let payload = json!({ "event": "COMMENT", "body": body, "comments": comments });
+    let mut payload = json!({ "event": "COMMENT", "body": body, "comments": comments });
+    if let Some(commit_id) = commit_id {
+        payload["commit_id"] = json!(commit_id);
+    }
     let result = github_post_request(token, &url).send_json(payload);
     match result {
         Ok(_) => {
@@ -499,8 +525,12 @@ pub fn post_review(
                 fallback_body.push_str("\n\n**Line findings:**\n");
                 fallback_body.push_str(&fallback_findings.join("\n"));
             }
+            let mut fallback_payload = json!({ "event": "COMMENT", "body": fallback_body });
+            if let Some(commit_id) = commit_id {
+                fallback_payload["commit_id"] = json!(commit_id);
+            }
             github_post_request(token, &url)
-                .send_json(json!({ "event": "COMMENT", "body": fallback_body }))
+                .send_json(fallback_payload)
                 .context("fallback summary review also failed")?;
             Ok(())
         }
@@ -667,5 +697,12 @@ mod tests {
         ];
         let values = fingerprints_from_comments(&comments, "github-actions[bot]");
         assert_eq!(values, BTreeSet::from(["trusted".to_string()]));
+    }
+
+    #[test]
+    fn expected_head_prevents_stale_hosted_reviews() {
+        assert!(expected_head_matches(None, "head"));
+        assert!(expected_head_matches(Some("head"), "head"));
+        assert!(!expected_head_matches(Some("old"), "head"));
     }
 }

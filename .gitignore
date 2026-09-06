@@ -1,3 +1,4 @@
 /target/
+hosted-state.json
 *.log
 .DS_Store

@@ -24,6 +24,19 @@ The reusable action can also be added directly:
 
 Pinning a full commit SHA instead of a release tag provides the strongest supply-chain protection. The installation workflow uses `pull_request_target` but never checks out or executes the pull request head; it treats the fetched diff only as review input.
 
+### Optional hosted GitHub App
+
+The repository also includes a deployable private-alpha hosted service for one-click GitHub App
+installation and service-owned provider credentials. It verifies signed `pull_request` webhooks,
+enforces per-installation quotas and idempotency, creates repository-scoped installation tokens,
+and invokes the same reviewer and normalized output contract. Existing Action and self-hosted paths
+remain unchanged.
+
+Start with [`hosted/README.md`](hosted/README.md). The
+[`architecture and threat model`](docs/hosted-service.md),
+[`privacy and retention policy`](docs/privacy.md), and
+[`migration guide`](docs/hosted-migration.md) define the alpha boundaries and public-launch gates.
+
 ## How it works
 
 1. The workflow triggers on `pull_request_target` events and runs the trusted, versioned reviewer action.
