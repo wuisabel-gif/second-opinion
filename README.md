@@ -57,6 +57,17 @@ Start with [`hosted/README.md`](hosted/README.md). The
 
 Multiple passes increase model usage proportionally, so the default remains one pass. For majority voting, start with `REVIEW_PASSES=3`; the default threshold will be 2.
 
+## Security review mode
+
+Run a SAST-style pass that reports only security vulnerabilities — SQL/command injection, XSS, broken auth/authorization (IDOR, missing access checks), leaked secrets, path traversal, SSRF, and unsafe deserialization — instead of the general bug review. Enable it with a flag or the `REVIEW_MODE` env var (the flag wins):
+
+```bash
+second-opinion --security                 # or: --mode security
+REVIEW_MODE=security second-opinion        # e.g. from a GitHub Action input
+```
+
+It reuses the same providers, consensus voting, and output pipeline; only the review prompt changes. Findings use the normal schema, with each `comment` prefixed by the vulnerability category, e.g. `[SQL Injection] …`. Works with `--benchmark` too: `second-opinion --security --benchmark suite.json`.
+
 ## Review rules
 
 Add `REVIEW.md` to the repository's default branch to define project-specific review policy:
