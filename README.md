@@ -73,6 +73,13 @@ Add `REVIEW.md` to the repository's default branch to define project-specific re
   scaffolding.
 ```
 
+## Skipping documentation-only changes
+
+Uncomment the `paths-ignore` lines in [`examples/review.yml`](examples/review.yml) to skip reviews
+when every changed file is documentation. GitHub then does not start the workflow at all, so no
+model usage is spent. A change that touches any other file is still reviewed in full, docs
+included. Adjust the patterns to match your repository's documentation layout.
+
 ## Provider setup
 
 Choose an adapter and add its credential under Settings, Secrets and variables, Actions. API providers use `REVIEW_API_KEY`; direct Codex mode uses `CODEX_AUTH_JSON`; a local unauthenticated service, webhook, or Codex broker may need neither. `REVIEW_PROVIDER` defaults to `anthropic`; other adapters require it explicitly. The `GITHUB_TOKEN` is supplied automatically. The example workflow grants `contents: read`, `pull-requests: write`, and `id-token: write`; the last permission only lets broker mode request a short-lived GitHub OIDC identity token.

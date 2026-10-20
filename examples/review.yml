@@ -3,9 +3,14 @@ name: Second-Opinion
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
+    # Optional: skip reviews when every changed file is documentation.
+    # paths-ignore: &docs-only
+    #   - "**/*.md"
+    #   - "docs/**"
   push:
     branches:
       - "**"
+    # paths-ignore: *docs-only
 
 permissions:
   contents: read
