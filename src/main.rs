@@ -3,18 +3,37 @@ mod broker;
 mod codex;
 mod github;
 mod model;
+mod sarif;
 
 use anyhow::{bail, Context, Result};
 use github::ReviewTarget;
 use model::{Provider, ReviewMode, ReviewRequest, ReviewStyle};
 use std::env;
 
+/// Review-wide output options resolved from flags/env, applied after the model runs.
+#[derive(Clone, Default)]
+struct OutputConfig {
+    /// Exit nonzero when a finding at or above this severity rank is reported.
+    fail_on: Option<u8>,
+    /// Write a SARIF 2.1.0 report to this path for GitHub code scanning.
+    sarif_path: Option<String>,
+}
+
+fn env_value(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Parse CLI args into (review mode, review style, optional benchmark suite
 /// path). A `--mode`/`--security` or `--style` flag wins over the matching
 /// `REVIEW_MODE` / `REVIEW_STYLE` env var.
-fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, Option<String>)> {
+fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, OutputConfig, Option<String>)> {
     let mut mode: Option<ReviewMode> = None;
     let mut style: Option<ReviewStyle> = None;
+    let mut fail_on: Option<u8> = None;
+    let mut sarif_path: Option<String> = None;
     let mut benchmark: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
@@ -41,6 +60,26 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, Option<String
             _ if arg.starts_with("--style=") => {
                 style = Some(ReviewStyle::parse(&arg["--style=".len()..])?);
             }
+            "--fail-on" => {
+                let value = args
+                    .get(i + 1)
+                    .context("--fail-on requires a value (high|medium|low)")?;
+                fail_on = Some(model::parse_severity_threshold(value)?);
+                i += 1;
+            }
+            _ if arg.starts_with("--fail-on=") => {
+                fail_on = Some(model::parse_severity_threshold(&arg["--fail-on=".len()..])?);
+            }
+            "--sarif" => {
+                let path = args
+                    .get(i + 1)
+                    .context("--sarif requires an output file path")?;
+                sarif_path = Some(path.clone());
+                i += 1;
+            }
+            _ if arg.starts_with("--sarif=") => {
+                sarif_path = Some(arg["--sarif=".len()..].to_string());
+            }
             "--benchmark" => {
                 let path = args
                     .get(i + 1)
@@ -50,7 +89,8 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, Option<String
             }
             other => bail!(
                 "unknown argument '{other}'; use --security, --mode <general|security>, \
-                 --style <strict|balanced|blocking-only>, or --benchmark <suite.json>"
+                 --style <strict|balanced|blocking-only>, --fail-on <high|medium|low>, \
+                 --sarif <file>, or --benchmark <suite.json>"
             ),
         }
         i += 1;
@@ -63,12 +103,28 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, Option<String
         Some(style) => style,
         None => ReviewStyle::from_env()?,
     };
-    Ok((mode, style, benchmark))
+    let fail_on = match fail_on {
+        Some(rank) => Some(rank),
+        None => match env_value("REVIEW_FAIL_ON") {
+            Some(value) => Some(model::parse_severity_threshold(&value)?),
+            None => None,
+        },
+    };
+    let sarif_path = sarif_path.or_else(|| env_value("REVIEW_SARIF_FILE"));
+    Ok((
+        mode,
+        style,
+        OutputConfig {
+            fail_on,
+            sarif_path,
+        },
+        benchmark,
+    ))
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let (mode, style, benchmark_path) = parse_args(&args)?;
+    let (mode, style, output, benchmark_path) = parse_args(&args)?;
     let provider = Provider::from_env()?;
     let api_key = provider.api_key()?;
     let model = provider.model()?;
@@ -120,6 +176,7 @@ fn main() -> Result<()> {
         threshold,
         mode,
         style,
+        &output,
     )
 }
 
@@ -135,6 +192,7 @@ fn run_review(
     threshold: usize,
     mode: ReviewMode,
     style: ReviewStyle,
+    output: &OutputConfig,
 ) -> Result<()> {
     if let ReviewTarget::Commit { sha, .. } = target {
         if github::commit_has_open_pull(github_token, repo, sha)? {
@@ -177,8 +235,25 @@ fn run_review(
         context: &input.context,
         rules: &input.rules,
     };
-    let mut review =
-        model::run_consensus(provider, api_key, model, &request, passes, threshold, mode, style)?;
+    let mut review = model::run_consensus(
+        provider, api_key, model, &request, passes, threshold, mode, style,
+    )?;
+
+    // SARIF and the severity gate act on the full consensus findings (the real
+    // state of the code), before PR-level dedup drops already-posted ones.
+    if let Some(path) = &output.sarif_path {
+        let document = sarif::to_sarif(&review, mode);
+        std::fs::write(path, serde_json::to_string_pretty(&document)?)
+            .with_context(|| format!("writing SARIF report to {path}"))?;
+        eprintln!("Wrote SARIF report to {path}");
+    }
+    let gate_failed = output.fail_on.is_some_and(|min| {
+        review
+            .findings
+            .iter()
+            .any(|finding| model::severity_rank(&finding.severity) >= min)
+    });
+
     if let ReviewTarget::PullRequest { number } = target {
         if !github::head_is_expected(github_token, repo, *number)? {
             eprintln!("Pull request head changed during model execution; discarding stale review.");
@@ -209,11 +284,29 @@ fn run_review(
             &input.commentable,
             github::expected_head_sha().as_deref(),
         )?;
-        return Ok(());
+        return gate_result(gate_failed, output.fail_on);
     }
 
     if let ReviewTarget::Commit { sha, .. } = target {
         github::post_commit_review(github_token, repo, sha, review, &input.commentable)?;
     }
+    gate_result(gate_failed, output.fail_on)
+}
+
+/// Exit nonzero (via an error) when the severity gate tripped, so CI goes red.
+fn gate_result(gate_failed: bool, fail_on: Option<u8>) -> Result<()> {
+    if gate_failed {
+        let level = fail_on.map(severity_name).unwrap_or("configured");
+        bail!("second-opinion gate: findings at or above '{level}' severity were reported");
+    }
     Ok(())
+}
+
+fn severity_name(rank: u8) -> &'static str {
+    match rank {
+        3 => "high",
+        2 => "medium",
+        1 => "low",
+        _ => "configured",
+    }
 }

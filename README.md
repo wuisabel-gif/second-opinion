@@ -80,6 +80,33 @@ REVIEW_STYLE=balanced second-opinion       # default behavior
 
 Styles: `strict`, `balanced` (default), `blocking-only`. Compose with any mode, e.g. `--mode security --style blocking-only` surfaces only exploitable, must-fix vulnerabilities.
 
+## Severity gate
+
+Make the run fail (nonzero exit) when a finding at or above a given severity is reported, so a review can block a merge. Select with a flag or `REVIEW_FAIL_ON` (flag wins):
+
+```bash
+second-opinion --security --fail-on high   # red build if any high-severity vuln is found
+REVIEW_FAIL_ON=medium second-opinion
+```
+
+The review is still posted first; the gate is evaluated on the full consensus findings (before per-PR dedup), so a known-unfixed issue keeps the check red on later pushes.
+
+## SARIF output (code scanning)
+
+Write findings as a SARIF 2.1.0 report so they appear in GitHub's Security tab, not just as PR comments. Select with a flag or `REVIEW_SARIF_FILE`:
+
+```bash
+second-opinion --security --sarif second-opinion.sarif
+```
+
+Severity maps to SARIF levels (high→error, medium→warning, low→note), and the `[Category]` prefix from security findings becomes the `ruleId` (e.g. `security/sql-injection`). Upload it from the workflow:
+
+```yaml
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: second-opinion.sarif
+```
+
 ## Review rules
 
 Add `REVIEW.md` to the repository's default branch to define project-specific review policy:
