@@ -68,6 +68,18 @@ REVIEW_MODE=security second-opinion        # e.g. from a GitHub Action input
 
 It reuses the same providers, consensus voting, and output pipeline; only the review prompt changes. Findings use the normal schema, with each `comment` prefixed by the vulnerability category, e.g. `[SQL Injection] …`. Works with `--benchmark` too: `second-opinion --security --benchmark suite.json`.
 
+## Reviewer style
+
+Independently of the mode (which sets *what* to look for), the style sets *how picky* the reviewer is. It appends a directive to the active mode prompt, so modes and styles compose freely. Select with a flag or `REVIEW_STYLE` (flag wins):
+
+```bash
+second-opinion --style strict              # flag more, including lower-confidence issues
+second-opinion --style blocking-only       # only high-severity, must-fix problems
+REVIEW_STYLE=balanced second-opinion       # default behavior
+```
+
+Styles: `strict`, `balanced` (default), `blocking-only`. Compose with any mode, e.g. `--mode security --style blocking-only` surfaces only exploitable, must-fix vulnerabilities.
+
 ## Review rules
 
 Add `REVIEW.md` to the repository's default branch to define project-specific review policy:

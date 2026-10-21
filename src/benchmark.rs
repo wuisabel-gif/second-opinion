@@ -1,4 +1,4 @@
-use crate::model::{self, Provider, ReviewMode, ReviewRequest};
+use crate::model::{self, Provider, ReviewMode, ReviewRequest, ReviewStyle};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
@@ -42,6 +42,7 @@ pub fn run(
     passes: usize,
     threshold: usize,
     mode: ReviewMode,
+    style: ReviewStyle,
 ) -> Result<()> {
     let suite: BenchmarkSuite = serde_json::from_str(
         &fs::read_to_string(path).with_context(|| format!("reading benchmark suite {path}"))?,
@@ -61,7 +62,7 @@ pub fn run(
             rules: &case.rules,
         };
         let review = model::run_consensus(
-            provider, api_key, model_name, &request, passes, threshold, mode,
+            provider, api_key, model_name, &request, passes, threshold, mode, style,
         )?;
         let expected: BTreeSet<(String, u64)> = case
             .expected
