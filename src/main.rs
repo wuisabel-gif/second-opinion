@@ -6,13 +6,15 @@ mod model;
 
 use anyhow::{bail, Context, Result};
 use github::ReviewTarget;
-use model::{Provider, ReviewMode, ReviewRequest};
+use model::{Provider, ReviewMode, ReviewRequest, ReviewStyle};
 use std::env;
 
-/// Parse CLI args into (review mode, optional benchmark suite path). A `--mode`
-/// / `--security` flag wins over the `REVIEW_MODE` env var.
-fn parse_args(args: &[String]) -> Result<(ReviewMode, Option<String>)> {
+/// Parse CLI args into (review mode, review style, optional benchmark suite
+/// path). A `--mode`/`--security` or `--style` flag wins over the matching
+/// `REVIEW_MODE` / `REVIEW_STYLE` env var.
+fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, Option<String>)> {
     let mut mode: Option<ReviewMode> = None;
+    let mut style: Option<ReviewStyle> = None;
     let mut benchmark: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
@@ -29,6 +31,16 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, Option<String>)> {
             _ if arg.starts_with("--mode=") => {
                 mode = Some(ReviewMode::parse(&arg["--mode=".len()..])?);
             }
+            "--style" => {
+                let value = args
+                    .get(i + 1)
+                    .context("--style requires a value (strict|balanced|blocking-only)")?;
+                style = Some(ReviewStyle::parse(value)?);
+                i += 1;
+            }
+            _ if arg.starts_with("--style=") => {
+                style = Some(ReviewStyle::parse(&arg["--style=".len()..])?);
+            }
             "--benchmark" => {
                 let path = args
                     .get(i + 1)
@@ -38,7 +50,7 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, Option<String>)> {
             }
             other => bail!(
                 "unknown argument '{other}'; use --security, --mode <general|security>, \
-                 or --benchmark <suite.json>"
+                 --style <strict|balanced|blocking-only>, or --benchmark <suite.json>"
             ),
         }
         i += 1;
@@ -47,12 +59,16 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, Option<String>)> {
         Some(mode) => mode,
         None => ReviewMode::from_env()?,
     };
-    Ok((mode, benchmark))
+    let style = match style {
+        Some(style) => style,
+        None => ReviewStyle::from_env()?,
+    };
+    Ok((mode, style, benchmark))
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let (mode, benchmark_path) = parse_args(&args)?;
+    let (mode, style, benchmark_path) = parse_args(&args)?;
     let provider = Provider::from_env()?;
     let api_key = provider.api_key()?;
     let model = provider.model()?;
@@ -67,6 +83,7 @@ fn main() -> Result<()> {
             passes,
             threshold,
             mode,
+            style,
         );
     }
 
@@ -76,16 +93,18 @@ fn main() -> Result<()> {
     match &target {
         ReviewTarget::PullRequest { number } => {
             eprintln!(
-                "Reviewing {repo}#{number} with {}/{model} ({} mode, {passes} pass(es), threshold {threshold})",
+                "Reviewing {repo}#{number} with {}/{model} ({} mode, {} style, {passes} pass(es), threshold {threshold})",
                 provider.name(),
-                mode.name()
+                mode.name(),
+                style.name()
             );
         }
         ReviewTarget::Commit { sha, .. } => {
             eprintln!(
-                "Reviewing {repo}@{sha} with {}/{model} ({} mode, {passes} pass(es), threshold {threshold})",
+                "Reviewing {repo}@{sha} with {}/{model} ({} mode, {} style, {passes} pass(es), threshold {threshold})",
                 provider.name(),
-                mode.name()
+                mode.name(),
+                style.name()
             );
         }
     }
@@ -100,6 +119,7 @@ fn main() -> Result<()> {
         passes,
         threshold,
         mode,
+        style,
     )
 }
 
@@ -114,6 +134,7 @@ fn run_review(
     passes: usize,
     threshold: usize,
     mode: ReviewMode,
+    style: ReviewStyle,
 ) -> Result<()> {
     if let ReviewTarget::Commit { sha, .. } = target {
         if github::commit_has_open_pull(github_token, repo, sha)? {
@@ -157,7 +178,7 @@ fn run_review(
         rules: &input.rules,
     };
     let mut review =
-        model::run_consensus(provider, api_key, model, &request, passes, threshold, mode)?;
+        model::run_consensus(provider, api_key, model, &request, passes, threshold, mode, style)?;
     if let ReviewTarget::PullRequest { number } = target {
         if !github::head_is_expected(github_token, repo, *number)? {
             eprintln!("Pull request head changed during model execution; discarding stale review.");
