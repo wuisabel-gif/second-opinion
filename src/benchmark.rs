@@ -44,6 +44,7 @@ pub fn run(
     threshold: usize,
     mode: ReviewMode,
     style: ReviewStyle,
+    verify: bool,
 ) -> Result<()> {
     let suite: BenchmarkSuite = serde_json::from_str(
         &fs::read_to_string(path).with_context(|| format!("reading benchmark suite {path}"))?,
@@ -61,9 +62,10 @@ pub fn run(
             diff: &case.diff,
             context: &case.context,
             rules: &case.rules,
+            candidates: None,
         };
         let review = model::run_consensus(
-            provider, api_key, model_name, &request, passes, threshold, mode, style,
+            provider, api_key, model_name, &request, passes, threshold, mode, style, verify,
         )?;
         let expected: BTreeSet<(String, u64)> = case
             .expected

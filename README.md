@@ -80,6 +80,16 @@ REVIEW_STYLE=balanced second-opinion       # default behavior
 
 Styles: `strict`, `balanced` (default), `blocking-only`. Compose with any mode, e.g. `--mode security --style blocking-only` surfaces only exploitable, must-fix vulnerabilities.
 
+## Verification pass
+
+By default, findings survive on a majority vote across passes (a *quantity* signal). Add `--verify` (or `REVIEW_VERIFY=true`) for a second-stage critic: the consensus findings are sent back to the model with the diff and a strict verifier prompt, and only the ones it confirms are kept — matched by file and line, so the verifier can neither invent new findings nor move them.
+
+```bash
+second-opinion --security --verify   # prune false positives before posting
+```
+
+This trades one extra model call for higher precision, which is the bigger lever for a security gate. It composes with any mode/style and runs before the severity gate and SARIF output, so both act on the verified set.
+
 ## Severity gate
 
 Make the run fail (nonzero exit) when a finding at or above a given severity is reported, so a review can block a merge. Select with a flag or `REVIEW_FAIL_ON` (flag wins):

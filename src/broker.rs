@@ -34,6 +34,7 @@ pub fn run_review(
         "diff": request.diff,
         "context": request.context,
         "rules": request.rules,
+        "candidates": request.candidates,
         "output_schema": output_schema,
     });
 
