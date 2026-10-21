@@ -234,6 +234,25 @@ impl ReviewRequest<'_> {
     }
 }
 
+/// Ordinal rank of a finding severity (high=3, medium=2, low=1). Unknown
+/// severities rank 0, so they never trip a `--fail-on` gate.
+pub fn severity_rank(severity: &str) -> u8 {
+    match severity.trim().to_ascii_lowercase().as_str() {
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+/// Parse a `--fail-on` / `REVIEW_FAIL_ON` threshold into a severity rank.
+pub fn parse_severity_threshold(value: &str) -> Result<u8> {
+    match severity_rank(value) {
+        0 => bail!("unsupported severity '{value}'; expected high, medium, or low"),
+        rank => Ok(rank),
+    }
+}
+
 pub fn voting_config() -> Result<(usize, usize)> {
     let passes = parse_bounded_env("REVIEW_PASSES", 1, 1, 7)?;
     let default_threshold = passes / 2 + 1;
@@ -254,6 +273,7 @@ fn parse_bounded_env(name: &str, default: usize, min: usize, max: usize) -> Resu
     Ok(value)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_consensus(
     provider: Provider,
     api_key: Option<&str>,
@@ -875,6 +895,16 @@ mod tests {
         assert!(ReviewStyle::BlockingOnly
             .directive()
             .contains("high-severity"));
+    }
+
+    #[test]
+    fn severity_rank_orders_and_threshold_validates() {
+        assert!(severity_rank("high") > severity_rank("medium"));
+        assert!(severity_rank("medium") > severity_rank("low"));
+        assert_eq!(severity_rank("LOW"), 1);
+        assert_eq!(severity_rank("bogus"), 0);
+        assert_eq!(parse_severity_threshold("high").unwrap(), 3);
+        assert!(parse_severity_threshold("critical").is_err());
     }
 
     #[test]

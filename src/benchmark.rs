@@ -34,6 +34,7 @@ fn default_repository() -> String {
     "benchmark/repository".to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     path: &str,
     provider: Provider,
