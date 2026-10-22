@@ -44,9 +44,10 @@ fn parse_args(
         match arg {
             "--security" => mode = Some(ReviewMode::Security),
             "--mode" => {
-                let value = args
-                    .get(i + 1)
-                    .context("--mode requires a value (general|security)")?;
+                let value = args.get(i + 1).context(
+                    "--mode requires a value \
+                         (general|security|performance|tests|breaking-changes)",
+                )?;
                 mode = Some(ReviewMode::parse(value)?);
                 i += 1;
             }
@@ -92,7 +93,8 @@ fn parse_args(
                 i += 1;
             }
             other => bail!(
-                "unknown argument '{other}'; use --security, --mode <general|security>, \
+                "unknown argument '{other}'; use --security, \
+                 --mode <general|security|performance|tests|breaking-changes>, \
                  --style <strict|balanced|blocking-only>, --verify, --fail-on <high|medium|low>, \
                  --sarif <file>, or --benchmark <suite.json>"
             ),

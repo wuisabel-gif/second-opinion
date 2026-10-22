@@ -68,6 +68,21 @@ REVIEW_MODE=security second-opinion        # e.g. from a GitHub Action input
 
 It reuses the same providers, consensus voting, and output pipeline; only the review prompt changes. Findings use the normal schema, with each `comment` prefixed by the vulnerability category, e.g. `[SQL Injection] …`. Works with `--benchmark` too: `second-opinion --security --benchmark suite.json`.
 
+### Other modes
+
+`--mode` (or `REVIEW_MODE`) selects the review focus. The default is `general`; `security` is the SAST pass above. Three more focus a single concern:
+
+- `performance` — inefficiencies with real impact: accidental quadratic work, N+1 queries, hot-path allocations, blocking I/O on async paths, unbounded growth.
+- `tests` — test-coverage gaps: changed logic, error paths, and edge cases with no test, or assertions that don't actually verify behavior.
+- `breaking-changes` — backward-incompatible changes to a public contract: removed/renamed APIs, changed signatures or defaults, stricter validation, changed serialization formats.
+
+```bash
+second-opinion --mode performance
+REVIEW_MODE=breaking-changes second-opinion
+```
+
+Every mode composes with `--style`, `--verify`, `--fail-on`, and `--sarif`.
+
 ## Reviewer style
 
 Independently of the mode (which sets *what* to look for), the style sets *how picky* the reviewer is. It appends a directive to the active mode prompt, so modes and styles compose freely. Select with a flag or `REVIEW_STYLE` (flag wins):
