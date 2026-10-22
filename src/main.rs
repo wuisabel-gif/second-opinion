@@ -29,9 +29,12 @@ fn env_value(name: &str) -> Option<String> {
 /// Parse CLI args into (review mode, review style, optional benchmark suite
 /// path). A `--mode`/`--security` or `--style` flag wins over the matching
 /// `REVIEW_MODE` / `REVIEW_STYLE` env var.
-fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, OutputConfig, Option<String>)> {
+fn parse_args(
+    args: &[String],
+) -> Result<(ReviewMode, ReviewStyle, bool, OutputConfig, Option<String>)> {
     let mut mode: Option<ReviewMode> = None;
     let mut style: Option<ReviewStyle> = None;
+    let mut verify: Option<bool> = None;
     let mut fail_on: Option<u8> = None;
     let mut sarif_path: Option<String> = None;
     let mut benchmark: Option<String> = None;
@@ -60,6 +63,7 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, OutputConfig,
             _ if arg.starts_with("--style=") => {
                 style = Some(ReviewStyle::parse(&arg["--style=".len()..])?);
             }
+            "--verify" => verify = Some(true),
             "--fail-on" => {
                 let value = args
                     .get(i + 1)
@@ -89,7 +93,7 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, OutputConfig,
             }
             other => bail!(
                 "unknown argument '{other}'; use --security, --mode <general|security>, \
-                 --style <strict|balanced|blocking-only>, --fail-on <high|medium|low>, \
+                 --style <strict|balanced|blocking-only>, --verify, --fail-on <high|medium|low>, \
                  --sarif <file>, or --benchmark <suite.json>"
             ),
         }
@@ -103,6 +107,16 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, OutputConfig,
         Some(style) => style,
         None => ReviewStyle::from_env()?,
     };
+    let verify = verify.unwrap_or_else(|| {
+        env_value("REVIEW_VERIFY")
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    });
     let fail_on = match fail_on {
         Some(rank) => Some(rank),
         None => match env_value("REVIEW_FAIL_ON") {
@@ -114,6 +128,7 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, OutputConfig,
     Ok((
         mode,
         style,
+        verify,
         OutputConfig {
             fail_on,
             sarif_path,
@@ -124,7 +139,7 @@ fn parse_args(args: &[String]) -> Result<(ReviewMode, ReviewStyle, OutputConfig,
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let (mode, style, output, benchmark_path) = parse_args(&args)?;
+    let (mode, style, verify, output, benchmark_path) = parse_args(&args)?;
     let provider = Provider::from_env()?;
     let api_key = provider.api_key()?;
     let model = provider.model()?;
@@ -140,6 +155,7 @@ fn main() -> Result<()> {
             threshold,
             mode,
             style,
+            verify,
         );
     }
 
@@ -176,6 +192,7 @@ fn main() -> Result<()> {
         threshold,
         mode,
         style,
+        verify,
         &output,
     )
 }
@@ -192,6 +209,7 @@ fn run_review(
     threshold: usize,
     mode: ReviewMode,
     style: ReviewStyle,
+    verify: bool,
     output: &OutputConfig,
 ) -> Result<()> {
     if let ReviewTarget::Commit { sha, .. } = target {
@@ -234,9 +252,10 @@ fn run_review(
         diff: &input.diff,
         context: &input.context,
         rules: &input.rules,
+        candidates: None,
     };
     let mut review = model::run_consensus(
-        provider, api_key, model, &request, passes, threshold, mode, style,
+        provider, api_key, model, &request, passes, threshold, mode, style, verify,
     )?;
 
     // SARIF and the severity gate act on the full consensus findings (the real
