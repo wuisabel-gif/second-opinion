@@ -253,6 +253,11 @@ pub fn severity_rank(severity: &str) -> u8 {
     }
 }
 
+/// Drop findings below the given severity rank, in place.
+pub fn filter_min_severity(findings: &mut Vec<Finding>, min: u8) {
+    findings.retain(|finding| severity_rank(&finding.severity) >= min);
+}
+
 /// Parse a `--fail-on` / `REVIEW_FAIL_ON` threshold into a severity rank.
 pub fn parse_severity_threshold(value: &str) -> Result<u8> {
     match severity_rank(value) {
@@ -1082,6 +1087,21 @@ mod tests {
         assert_eq!(result.findings[0].path, "a.rs");
         assert_eq!(result.findings[0].comment, "real bug"); // original comment kept
         assert!(result.summary.contains("confirmed 1 of 2"));
+    }
+
+    #[test]
+    fn min_severity_drops_sub_threshold_findings() {
+        let mut findings = vec![
+            finding("a.rs", 1, "low"),
+            finding("b.rs", 2, "high"),
+            finding("c.rs", 3, "medium"),
+        ];
+        findings[0].severity = "low".into();
+        findings[1].severity = "high".into();
+        findings[2].severity = "medium".into();
+        filter_min_severity(&mut findings, severity_rank("medium"));
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().all(|f| f.severity != "low"));
     }
 
     #[test]

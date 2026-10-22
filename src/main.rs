@@ -13,6 +13,8 @@ use std::env;
 /// Review-wide output options resolved from flags/env, applied after the model runs.
 #[derive(Clone, Default)]
 struct OutputConfig {
+    /// Drop findings below this severity rank before anything else uses them.
+    min_severity: Option<u8>,
     /// Exit nonzero when a finding at or above this severity rank is reported.
     fail_on: Option<u8>,
     /// Write a SARIF 2.1.0 report to this path for GitHub code scanning.
@@ -35,6 +37,7 @@ fn parse_args(
     let mut mode: Option<ReviewMode> = None;
     let mut style: Option<ReviewStyle> = None;
     let mut verify: Option<bool> = None;
+    let mut min_severity: Option<u8> = None;
     let mut fail_on: Option<u8> = None;
     let mut sarif_path: Option<String> = None;
     let mut benchmark: Option<String> = None;
@@ -65,6 +68,18 @@ fn parse_args(
                 style = Some(ReviewStyle::parse(&arg["--style=".len()..])?);
             }
             "--verify" => verify = Some(true),
+            "--min-severity" => {
+                let value = args
+                    .get(i + 1)
+                    .context("--min-severity requires a value (high|medium|low)")?;
+                min_severity = Some(model::parse_severity_threshold(value)?);
+                i += 1;
+            }
+            _ if arg.starts_with("--min-severity=") => {
+                min_severity = Some(model::parse_severity_threshold(
+                    &arg["--min-severity=".len()..],
+                )?);
+            }
             "--fail-on" => {
                 let value = args
                     .get(i + 1)
@@ -95,7 +110,8 @@ fn parse_args(
             other => bail!(
                 "unknown argument '{other}'; use --security, \
                  --mode <general|security|performance|tests|breaking-changes>, \
-                 --style <strict|balanced|blocking-only>, --verify, --fail-on <high|medium|low>, \
+                 --style <strict|balanced|blocking-only>, --verify, \
+                 --min-severity <high|medium|low>, --fail-on <high|medium|low>, \
                  --sarif <file>, or --benchmark <suite.json>"
             ),
         }
@@ -119,6 +135,13 @@ fn parse_args(
             })
             .unwrap_or(false)
     });
+    let min_severity = match min_severity {
+        Some(rank) => Some(rank),
+        None => match env_value("REVIEW_MIN_SEVERITY") {
+            Some(value) => Some(model::parse_severity_threshold(&value)?),
+            None => None,
+        },
+    };
     let fail_on = match fail_on {
         Some(rank) => Some(rank),
         None => match env_value("REVIEW_FAIL_ON") {
@@ -132,6 +155,7 @@ fn parse_args(
         style,
         verify,
         OutputConfig {
+            min_severity,
             fail_on,
             sarif_path,
         },
@@ -259,6 +283,12 @@ fn run_review(
     let mut review = model::run_consensus(
         provider, api_key, model, &request, passes, threshold, mode, style, verify,
     )?;
+
+    // Drop sub-threshold findings first, so SARIF, the gate, and posting all
+    // act on the same filtered set.
+    if let Some(min) = output.min_severity {
+        model::filter_min_severity(&mut review.findings, min);
+    }
 
     // SARIF and the severity gate act on the full consensus findings (the real
     // state of the code), before PR-level dedup drops already-posted ones.

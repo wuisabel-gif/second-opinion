@@ -105,6 +105,17 @@ second-opinion --security --verify   # prune false positives before posting
 
 This trades one extra model call for higher precision, which is the bigger lever for a security gate. It composes with any mode/style and runs before the severity gate and SARIF output, so both act on the verified set.
 
+## Minimum severity
+
+Drop findings below a given severity before anything else uses them, to cut low-severity noise. Select with a flag or `REVIEW_MIN_SEVERITY` (flag wins):
+
+```bash
+second-opinion --min-severity medium   # ignore low-severity findings entirely
+REVIEW_MIN_SEVERITY=high second-opinion
+```
+
+The filter runs first, so the posted comments, the SARIF report, and the severity gate all act on the same reduced set.
+
 ## Severity gate
 
 Make the run fail (nonzero exit) when a finding at or above a given severity is reported, so a review can block a merge. Select with a flag or `REVIEW_FAIL_ON` (flag wins):
